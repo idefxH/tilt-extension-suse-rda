@@ -1,0 +1,6 @@
+name: hello
+replicas: 1
+port: 8080
+image:
+  repository: hello
+  tag: dev

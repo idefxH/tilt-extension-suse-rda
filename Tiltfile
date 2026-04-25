@@ -1,0 +1,194 @@
+# tilt-extension-suse-rda — suse_app() helper.
+#
+# Wraps Cloud Native Buildpacks (via `pack`), Helm install, and service
+# port-forwarding into a single declarative call. Designed for projects
+# scaffolded by `rda new` from a SUSE Rancher Developer Access opinion
+# bundle, but usable from any Tiltfile that wants the same conventions.
+#
+# Usage in a project's Tiltfile:
+#
+#   load_dynamic('https://raw.githubusercontent.com/idefxH/tilt-extension-suse-rda/main/Tiltfile')
+#   suse_app(
+#       name='payment-service',
+#       language='nodejs',
+#       port=8080,
+#       services={'database': 'postgresql'},
+#   )
+#
+# That replaces ~30 lines of docker_build / helm / k8s_resource boilerplate
+# with one call. Override builder_image when SUSE-AppCo buildpacks ship.
+
+# Paketo full builder. Bundles every supported language + tools — heavier
+# than -tiny but eliminates "buildpack didn't detect" errors and aligns
+# behaviour across nodejs / python / java / go.
+DEFAULT_BUILDER = 'paketobuildpacks/builder-jammy-base:latest'
+
+# Per-language defaults. Live-update paths follow each buildpack's
+# expected workspace layout. Languages requiring a full rebuild on every
+# change (compiled) leave live_update_paths empty — Tilt rebuilds via
+# pack on file change, with Paketo's layer cache providing the speed-up.
+LANGUAGE_DEFAULTS = {
+    'nodejs': {
+        'buildpacks': ['paketo-buildpacks/nodejs'],
+        'live_update_paths': ['./src'],
+        'live_update_install_trigger': ['./package.json', './package-lock.json'],
+        'live_update_install_cmd': 'cd /workspace && npm install --production=false',
+    },
+    'python': {
+        'buildpacks': ['paketo-buildpacks/python'],
+        'live_update_paths': ['./src'],
+        'live_update_install_trigger': ['./requirements.txt', './pyproject.toml', './Pipfile'],
+        'live_update_install_cmd': 'cd /workspace && pip install -r requirements.txt 2>/dev/null || true',
+    },
+    'java': {
+        'buildpacks': ['paketo-buildpacks/java'],
+        'live_update_paths': [],
+        'live_update_install_trigger': [],
+        'live_update_install_cmd': None,
+    },
+    'go': {
+        'buildpacks': ['paketo-buildpacks/go'],
+        'live_update_paths': [],
+        'live_update_install_trigger': [],
+        'live_update_install_cmd': None,
+    },
+}
+
+# Conventional ports for service types declared in `services`. Used by
+# port_forwards so a developer can `psql -h localhost -p 5432`, etc.
+SERVICE_PORTS = {
+    'postgresql': 5432,
+    'redis': 6379,
+    'mysql': 3306,
+    'mongodb': 27017,
+    'kafka': 9092,
+    'rabbitmq': 5672,
+    'nats': 4222,
+}
+
+
+def suse_app(
+        name,
+        language,
+        port=8080,
+        services={},
+        chart_path='.',
+        chart_values_files=['values.yaml'],
+        builder_image=None,
+        extra_buildpacks=[],
+        additional_env={},
+        live_update_paths=None,
+        ui_labels=None):
+    """Build a project image with pack, deploy its Helm chart, and surface
+    convenient port-forwards for the app and any declared services.
+
+    Required:
+        name (str): project name. Must equal the Helm release name and the
+            chart's metadata.name (so the Deployment resource name matches).
+        language (str): one of 'nodejs', 'python', 'java', 'go'. Drives the
+            default buildpacks and live-update behaviour.
+
+    Common:
+        port (int): HTTP port exposed by the app container. Default 8080.
+        services (dict): map of service binding name -> service type. The
+            service type must be one of SERVICE_PORTS keys to get a default
+            port-forward; unknown types still get a workload entry but no
+            port-forward. Example: {'database': 'postgresql'}.
+        chart_path (str): path to the Helm chart relative to the Tiltfile.
+            Default '.' (current directory).
+        chart_values_files (list[str]): values files passed to helm. Default
+            ['values.yaml'].
+
+    Override:
+        builder_image (str): CNB builder image. Default Paketo full builder.
+            Override when SUSE-AppCo buildpacks ship:
+            builder_image='registry.suse.com/rda/builder:latest'.
+        extra_buildpacks (list[str]): additional CNB buildpacks appended to
+            the language defaults. Useful for the future SUSE OTel buildpack
+            or a service-binding buildpack.
+        additional_env (dict): build-time env vars passed via `pack build --env`.
+            E.g. {'BP_NODE_VERSION': '22'}.
+        live_update_paths (list[str]): override default sync paths. Pass an
+            empty list to disable live_update entirely.
+        ui_labels (dict): map of resource name -> Tilt UI label. Defaults
+            map the app to 'app', services to 'services'.
+    """
+    if language not in LANGUAGE_DEFAULTS:
+        fail('suse_app: unsupported language %r. Supported: %s' % (
+            language, ', '.join(sorted(LANGUAGE_DEFAULTS.keys()))))
+
+    defaults = LANGUAGE_DEFAULTS[language]
+    builder = builder_image or DEFAULT_BUILDER
+    buildpacks = defaults['buildpacks'] + extra_buildpacks
+    sync_paths = live_update_paths if live_update_paths != None else defaults['live_update_paths']
+    labels = ui_labels or {}
+
+    # Build pack command. Tilt's $EXPECTED_REF is substituted at build time.
+    pack_args = ['pack', 'build', '$EXPECTED_REF', '--builder', builder]
+    for bp in buildpacks:
+        pack_args.extend(['--buildpack', bp])
+    for k, v in additional_env.items():
+        pack_args.extend(['--env', '%s=%s' % (k, v)])
+    pack_args.extend(['--path', '.'])
+    pack_cmd = ' '.join(pack_args)
+
+    # Live update steps. Only nodejs and python use live_update by default;
+    # compiled languages rebuild via pack on each change.
+    live_update_steps = []
+    for path in sync_paths:
+        # Paketo lays out source at /workspace; sync the same relative path.
+        sync_target = '/workspace/' + path.lstrip('./')
+        live_update_steps.append(sync(path, sync_target))
+    install_cmd = defaults.get('live_update_install_cmd')
+    install_trigger = defaults.get('live_update_install_trigger', [])
+    if install_cmd and install_trigger:
+        live_update_steps.append(run(install_cmd, trigger=install_trigger))
+
+    # Build deps: file paths Tilt watches. Empty sync_paths means "watch the
+    # whole project" — rebuild on any change. With sync paths set, Tilt
+    # only rebuilds for changes outside those paths (e.g. Chart.yaml, Dockerfile).
+    deps = sync_paths if sync_paths else ['.']
+
+    custom_build(
+        ref=name + ':dev',
+        command=pack_cmd,
+        deps=deps,
+        live_update=live_update_steps if live_update_steps else None,
+    )
+
+    # Helm install. Renders the chart at chart_path with the given values
+    # files, applies the resulting manifests to the cluster.
+    k8s_yaml(helm(
+        chart_path,
+        name=name,
+        values=chart_values_files,
+    ))
+
+    # Surface the application Service on the requested port. Convention:
+    # local port == container port, so curl http://localhost:<port> works
+    # the same as in production behind an Ingress.
+    k8s_resource(
+        workload=name,
+        port_forwards='%d:%d' % (port, port),
+        labels=[labels.get(name, 'app')],
+    )
+
+    # Surface each declared service on its conventional port. Workload name
+    # follows the SUSE library chart convention: <release>-<binding-name>.
+    for binding_name, service_type in services.items():
+        workload = name + '-' + binding_name
+        if service_type in SERVICE_PORTS:
+            svc_port = SERVICE_PORTS[service_type]
+            k8s_resource(
+                workload=workload,
+                port_forwards='%d:%d' % (svc_port, svc_port),
+                labels=[labels.get(workload, 'services')],
+            )
+        else:
+            # Unknown type: register the workload but skip port-forward.
+            # The user can add their own k8s_resource call after suse_app()
+            # if they need a non-standard port.
+            k8s_resource(
+                workload=workload,
+                labels=[labels.get(workload, 'services')],
+            )
