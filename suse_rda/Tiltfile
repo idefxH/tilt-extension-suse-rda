@@ -168,19 +168,18 @@ def suse_app(
     # charts/suse-library/charts/ and their resources never get rendered.
     # Requires `helm registry login dp.apps.rancher.io` (one-time, typically
     # wired by the AppCo Rancher Desktop extension).
-    local(
-        'set -e; '
-        'for sub in ' + chart_path + '/charts/*/; do '
-        '  if [ -f "$sub/Chart.yaml" ] && grep -q "^dependencies:" "$sub/Chart.yaml"; then '
-        '    echo "[suse_rda] helm dep update $sub"; '
-        '    helm dependency update "$sub"; '
-        '  fi; '
-        'done; '
-        'echo "[suse_rda] helm dep update ' + chart_path + '"; '
-        'helm dependency update ' + chart_path + ';',
-        echo_off=True,
-        quiet=False,
+    helm_dep_script = (
+        'set -e; ' +
+        'for sub in ' + chart_path + '/charts/*/; do ' +
+        '  if [ -f "$sub/Chart.yaml" ] && grep -q "^dependencies:" "$sub/Chart.yaml"; then ' +
+        '    echo "[suse_rda] helm dep update $sub"; ' +
+        '    helm dependency update "$sub"; ' +
+        '  fi; ' +
+        'done; ' +
+        'echo "[suse_rda] helm dep update ' + chart_path + '"; ' +
+        'helm dependency update ' + chart_path + ';'
     )
+    local(helm_dep_script, echo_off=True, quiet=False)
     k8s_yaml(helm(
         chart_path,
         name=name,
