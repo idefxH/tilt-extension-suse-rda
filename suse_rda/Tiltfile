@@ -18,13 +18,27 @@
 # That replaces ~30 lines of docker_build / helm / k8s_resource boilerplate
 # with one call. Override builder_image when SUSE-AppCo buildpacks ship.
 
-# Paketo full builder. Bundles every supported language + tools — heavier
-# than -base but bundles a coherent set of buildpack versions whose env
-# (notably PATH) propagates correctly between layers. The -base builder
-# ships node-engine 8.0.10 + npm-install 2.3.13 which leave node out of
-# PATH, breaking npm install. The -full builder bundles versions that
-# cooperate. Aligns behaviour across nodejs / python / java / go.
-DEFAULT_BUILDER = 'paketobuildpacks/builder-jammy-full:latest'
+# Paketo full builder, pinned to a known-stable tag.
+#
+# Why pinned and not :latest:
+#   Paketo's node-engine v8.0.0 (released 2026-01-08) removed the
+#   explicit PATH=$NODE_HOME/bin:$PATH from its layer env, on the
+#   assumption that the lifecycle would propagate it implicitly via
+#   layer-bin discovery. Combined with the npm-install version shipped
+#   in builder :latest since then, this drops node out of PATH at the
+#   npm-install step:
+#     /usr/bin/env: 'node': No such file or directory
+#   The bug reproduces with both -base and -full :latest as long as
+#   node-engine >= 8.0.0 is bundled.
+#
+# 0.3.571 (2026-01-02) is the last full-builder tag published before
+# the 8.x bump and still ships node-engine 7.13.2, which works.
+#
+# Drop this pin when either:
+#   - Paketo restores PATH in node-engine 8.x (track upstream issue), or
+#   - We move to AppCo buildpacks (tilt-extension-suse-rda#1), at
+#     which point the dev contract becomes 'one trust root, one bundle'.
+DEFAULT_BUILDER = 'paketobuildpacks/builder-jammy-full:0.3.571'
 
 # Per-language defaults. Live-update paths follow each buildpack's
 # expected workspace layout. Languages requiring a full rebuild on every
