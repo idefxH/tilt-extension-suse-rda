@@ -18,27 +18,24 @@
 # That replaces ~30 lines of docker_build / helm / k8s_resource boilerplate
 # with one call. Override builder_image when SUSE-AppCo buildpacks ship.
 
-# Paketo full builder, pinned to a known-stable tag.
+# Heroku CNB builder. Multi-arch (linux/amd64 + linux/arm64) so the
+# buildpack inner loop runs natively on Apple Silicon — no Rosetta, no
+# binfmt_misc shenanigans, no /usr/bin/env: 'node': No such file or
+# directory at the npm-install step.
 #
-# Why pinned and not :latest:
-#   Paketo's node-engine v8.0.0 (released 2026-01-08) removed the
-#   explicit PATH=$NODE_HOME/bin:$PATH from its layer env, on the
-#   assumption that the lifecycle would propagate it implicitly via
-#   layer-bin discovery. Combined with the npm-install version shipped
-#   in builder :latest since then, this drops node out of PATH at the
-#   npm-install step:
-#     /usr/bin/env: 'node': No such file or directory
-#   The bug reproduces with both -base and -full :latest as long as
-#   node-engine >= 8.0.0 is bundled.
+# Why not Paketo: paketobuildpacks/builder-* are amd64-only as of
+# 2026-04-27. Running them on arm64 hosts forces the lifecycle through
+# Rosetta inside Rancher Desktop's containerd VM, where binfmt_misc
+# handler resolution is unreliable for nested execve in pack's
+# ephemeral-lifecycle container. Reproduces with every Paketo tag we
+# tested (jammy-base, jammy-full, all versions). Net: not actionable on
+# our side until Paketo or AppCo publishes an arm64 builder. Tracked in
+# tilt-extension-suse-rda#1 for the AppCo migration.
 #
-# 0.3.571 (2026-01-02) is the last full-builder tag published before
-# the 8.x bump and still ships node-engine 7.13.2, which works.
-#
-# Drop this pin when either:
-#   - Paketo restores PATH in node-engine 8.x (track upstream issue), or
-#   - We move to AppCo buildpacks (tilt-extension-suse-rda#1), at
-#     which point the dev contract becomes 'one trust root, one bundle'.
-DEFAULT_BUILDER = 'paketobuildpacks/builder-jammy-full:0.3.571'
+# Heroku 24 series: builder ~400MB (vs Paketo full 1.5GB), ships
+# heroku/nodejs (active, v5.5.8 on 2026-04-16), heroku/python,
+# heroku/go, heroku/java, heroku/ruby. Run image: heroku/heroku:24.
+DEFAULT_BUILDER = 'heroku/builder:24'
 
 # Per-language defaults. Live-update paths follow each buildpack's
 # expected workspace layout. Languages requiring a full rebuild on every
@@ -46,25 +43,25 @@ DEFAULT_BUILDER = 'paketobuildpacks/builder-jammy-full:0.3.571'
 # pack on file change, with Paketo's layer cache providing the speed-up.
 LANGUAGE_DEFAULTS = {
     'nodejs': {
-        'buildpacks': ['paketo-buildpacks/nodejs'],
+        'buildpacks': ['heroku/nodejs'],
         'live_update_paths': ['./src'],
         'live_update_install_trigger': ['./package.json', './package-lock.json'],
         'live_update_install_cmd': 'cd /workspace && npm install --production=false',
     },
     'python': {
-        'buildpacks': ['paketo-buildpacks/python'],
+        'buildpacks': ['heroku/python'],
         'live_update_paths': ['./src'],
         'live_update_install_trigger': ['./requirements.txt', './pyproject.toml', './Pipfile'],
         'live_update_install_cmd': 'cd /workspace && pip install -r requirements.txt 2>/dev/null || true',
     },
     'java': {
-        'buildpacks': ['paketo-buildpacks/java'],
+        'buildpacks': ['heroku/java'],
         'live_update_paths': [],
         'live_update_install_trigger': [],
         'live_update_install_cmd': None,
     },
     'go': {
-        'buildpacks': ['paketo-buildpacks/go'],
+        'buildpacks': ['heroku/go'],
         'live_update_paths': [],
         'live_update_install_trigger': [],
         'live_update_install_cmd': None,
