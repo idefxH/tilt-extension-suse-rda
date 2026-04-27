@@ -162,6 +162,7 @@ def suse_app(
         chart_path,
         name=name,
         values=chart_values_files,
+        dependency_update=True,  # resolves AppCo OCI sub-charts at deploy time
     ))
 
     # Surface the application Service on the requested port. Convention:
