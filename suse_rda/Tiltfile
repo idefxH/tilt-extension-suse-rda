@@ -156,17 +156,31 @@ def suse_app(
     pack_args.extend(['--path', '.'])
     pack_cmd = ' '.join(pack_args)
 
-    # Live update steps. Only nodejs and python use live_update by default;
-    # compiled languages rebuild via pack on each change.
+    # Live update steps. Only interpreted languages (nodejs, python) use
+    # live_update by default; compiled languages rebuild via pack on each
+    # change. The cycle for live update is:
+    #   1. sync changed files from host to /workspace/ in the running container
+    #   2. (optional) run the language's reinstall command if a trigger fires
+    #   3. restart_container() — kill PID 1 so the CNB launcher relaunches
+    #      the process with the new code. Brings save->running from ~16s
+    #      (full pack build) down to ~1-2s (just kernel-level restart).
+    #
+    # For sub-second hot reload, the user can wire `node --watch` or
+    # uvicorn --reload via a custom Procfile, but that requires shipping
+    # the watcher in the prod image; restart_container() is the language-
+    # agnostic compromise.
     live_update_steps = []
     for path in sync_paths:
-        # Paketo lays out source at /workspace; sync the same relative path.
+        # CNB launchers (Heroku, Paketo) lay out source at /workspace.
         sync_target = '/workspace/' + path.lstrip('./')
         live_update_steps.append(sync(path, sync_target))
     install_cmd = defaults.get('live_update_install_cmd')
     install_trigger = defaults.get('live_update_install_trigger', [])
     if install_cmd and install_trigger:
         live_update_steps.append(run(install_cmd, trigger=install_trigger))
+    # Restart so the CNB launcher re-exec's the process with the synced code.
+    if sync_paths:
+        live_update_steps.append(restart_container())
 
     # Build deps: file paths Tilt watches. Empty sync_paths means "watch the
     # whole project" — rebuild on any change. With sync paths set, Tilt
