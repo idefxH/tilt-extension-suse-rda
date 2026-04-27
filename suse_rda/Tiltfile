@@ -362,13 +362,16 @@ if __name__ == "__main__":
     )
 
     # Surface each declared service on its conventional port. Workload name
-    # follows what the AppCo sub-chart actually deploys: <release>-<chart-name>.
-    # The AppCo chart name is what the project declared as the service_type
-    # (e.g. 'postgresql'), so the K8s Service is named <release>-postgresql
-    # regardless of how the binding is aliased in the library chart values.
-    # The binding_name is preserved only as a logical identifier in /bindings/.
+    # follows what the AppCo sub-chart actually deploys: <release>-<alias>,
+    # where alias = the binding name the library chart declared (e.g.
+    # 'database'). With Helm alias resolution working correctly, the chart
+    # renders all its resources prefixed with the alias rather than its own
+    # chart name. So services={'database': 'postgresql'} in suse_app() maps
+    # to a workload named <release>-database (NOT <release>-postgresql).
+    # The service_type is kept as a logical identifier — the binding name
+    # is what the K8s API uses.
     for binding_name, service_type in services.items():
-        workload = name + '-' + service_type
+        workload = name + '-' + binding_name
         if service_type in SERVICE_PORTS:
             svc_port = SERVICE_PORTS[service_type]
             k8s_resource(
