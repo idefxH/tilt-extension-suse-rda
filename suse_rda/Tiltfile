@@ -19,9 +19,12 @@
 # with one call. Override builder_image when SUSE-AppCo buildpacks ship.
 
 # Paketo full builder. Bundles every supported language + tools — heavier
-# than -tiny but eliminates "buildpack didn't detect" errors and aligns
-# behaviour across nodejs / python / java / go.
-DEFAULT_BUILDER = 'paketobuildpacks/builder-jammy-base:latest'
+# than -base but bundles a coherent set of buildpack versions whose env
+# (notably PATH) propagates correctly between layers. The -base builder
+# ships node-engine 8.0.10 + npm-install 2.3.13 which leave node out of
+# PATH, breaking npm install. The -full builder bundles versions that
+# cooperate. Aligns behaviour across nodejs / python / java / go.
+DEFAULT_BUILDER = 'paketobuildpacks/builder-jammy-full:latest'
 
 # Per-language defaults. Live-update paths follow each buildpack's
 # expected workspace layout. Languages requiring a full rebuild on every
