@@ -206,7 +206,7 @@ def suse_app(
     # loaded via ext:// (no __file__ equivalent in Starlark, and
     # read_file() resolves relative to the user's project Tiltfile).
     align_script_path = '/tmp/_suse_rda_align_subchart_versions.py'
-    align_script_src = '''#!/usr/bin/env python3
+    align_script_src = r'''#!/usr/bin/env python3
 """
 Align vendored sub-chart Chart.yaml versions with the parent's dep
 declarations.
