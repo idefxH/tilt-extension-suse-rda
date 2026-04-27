@@ -165,6 +165,11 @@ def suse_app(
     dev_proc = defaults.get('pack_default_process')
     if dev_proc:
         pack_args.extend(['--default-process', dev_proc])
+    # Per-language build-time env vars (e.g. NODE_ENV=development to
+    # force npm ci to include devDependencies, so dev tools like
+    # nodemon make it into the image).
+    for k, v in (defaults.get('pack_build_env') or {}).items():
+        pack_args.extend(['--env', '%s=%s' % (k, v)])
     pack_args.extend(['--path', '.'])
     pack_cmd = ' '.join(pack_args)
 
