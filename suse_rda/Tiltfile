@@ -190,6 +190,19 @@ def suse_app(
         'fi'
     )
     local(helm_dep_script, echo_off=True, quiet=False)
+
+    # Ignore helm-managed paths so Tilt doesn't reload-loop. helm dep update
+    # writes .tgz files into charts/<sub>/charts/, plus tmpcharts-* dirs and
+    # Chart.lock. Tilt watches the project tree by default; without these
+    # ignores every helm dep update triggers a reload that re-runs helm dep
+    # update -> infinite loop.
+    watch_settings(ignore=[
+        chart_path + '/charts/*/charts',
+        chart_path + '/charts/*/tmpcharts-*',
+        chart_path + '/charts/*/Chart.lock',
+        chart_path + '/Chart.lock',
+    ])
+
     k8s_yaml(helm(
         chart_path,
         name=name,
