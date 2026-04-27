@@ -43,20 +43,17 @@ DEFAULT_BUILDER = 'heroku/builder:24'
 # pack on file change, with Paketo's layer cache providing the speed-up.
 LANGUAGE_DEFAULTS = {
     'nodejs': {
-        # heroku/nodejs is a META-buildpack. When passed to pack via
-        # --buildpack, pack treats it as a single id and does NOT expand
-        # its order group, so the sub-buildpacks (npm-install in particular)
-        # never run, and the resulting image has no node_modules:
-        #   Error: Cannot find module 'express' at /workspace/src/index.js
-        # We list the sub-buildpacks explicitly. heroku/procfile reads
-        # ./Procfile to register the default 'web' process. heroku/nodejs
-        # 5.x dropped automatic detection of package.json scripts.start.
-        'buildpacks': [
-            'heroku/nodejs-engine',
-            'heroku/nodejs-npm-engine',
-            'heroku/nodejs-npm-install',
-            'heroku/procfile',
-        ],
+        # heroku/nodejs in v5+ is a unified single buildpack that handles
+        # engine resolution + npm install internally. The previous
+        # sub-buildpacks (heroku/nodejs-engine, -npm-engine, -npm-install)
+        # are deprecated in v5: the lifecycle DETECT phase reports
+        # 'Usage of \`heroku/nodejs-engine\` is deprecated... Equivalent
+        # functionality is now provided by the heroku/nodejs buildpack'.
+        # Requires a committed package-lock.json so heroku/nodejs runs
+        # npm ci (the bundle template ships one).
+        # heroku/procfile reads ./Procfile to register the default 'web'
+        # process — heroku/nodejs 5.x doesn't auto-detect scripts.start.
+        'buildpacks': ['heroku/nodejs', 'heroku/procfile'],
         'live_update_paths': ['./src'],
         'live_update_install_trigger': ['./package.json', './package-lock.json'],
         'live_update_install_cmd': 'cd /workspace && npm install --production=false',
