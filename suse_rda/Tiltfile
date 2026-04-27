@@ -182,9 +182,13 @@ def suse_app(
     )
 
     # Surface each declared service on its conventional port. Workload name
-    # follows the SUSE library chart convention: <release>-<binding-name>.
+    # follows what the AppCo sub-chart actually deploys: <release>-<chart-name>.
+    # The AppCo chart name is what the project declared as the service_type
+    # (e.g. 'postgresql'), so the K8s Service is named <release>-postgresql
+    # regardless of how the binding is aliased in the library chart values.
+    # The binding_name is preserved only as a logical identifier in /bindings/.
     for binding_name, service_type in services.items():
-        workload = name + '-' + binding_name
+        workload = name + '-' + service_type
         if service_type in SERVICE_PORTS:
             svc_port = SERVICE_PORTS[service_type]
             k8s_resource(
