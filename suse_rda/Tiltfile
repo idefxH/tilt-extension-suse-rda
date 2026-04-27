@@ -168,16 +168,26 @@ def suse_app(
     # charts/suse-library/charts/ and their resources never get rendered.
     # Requires `helm registry login dp.apps.rancher.io` (one-time, typically
     # wired by the AppCo Rancher Desktop extension).
+    # Strategy: only run helm dep update INSIDE vendored sub-chart directories.
+    # We skip 'helm dep update' on the parent because:
+    #   1. The bundle vendors sub-charts as directories under charts/*. helm
+    #      template reads them directly — no parent update needed.
+    #   2. Running it on the parent repackages directories into .tgz files
+    #      and deletes any unmatched charts/, which interferes with the
+    #      recursive dep-update step.
+    # If the user introduces a non-vendored top-level dep later, they should
+    # vendor it (rda convention) or run helm dep update themselves.
     helm_dep_script = (
         'set -e; ' +
-        'for sub in ' + chart_path + '/charts/*/; do ' +
-        '  if [ -f "$sub/Chart.yaml" ] && grep -q "^dependencies:" "$sub/Chart.yaml"; then ' +
-        '    echo "[suse_rda] helm dep update $sub"; ' +
-        '    helm dependency update "$sub"; ' +
-        '  fi; ' +
-        'done; ' +
-        'echo "[suse_rda] helm dep update ' + chart_path + '"; ' +
-        'helm dependency update ' + chart_path + ';'
+        'if [ -d "' + chart_path + '/charts" ]; then ' +
+        '  for sub in "' + chart_path + '"/charts/*/; do ' +
+        '    [ -d "$sub" ] || continue; ' +
+        '    if [ -f "$sub/Chart.yaml" ] && grep -q "^dependencies:" "$sub/Chart.yaml"; then ' +
+        '      echo "[suse_rda] helm dep update $sub"; ' +
+        '      helm dependency update "$sub"; ' +
+        '    fi; ' +
+        '  done; ' +
+        'fi'
     )
     local(helm_dep_script, echo_off=True, quiet=False)
     k8s_yaml(helm(
