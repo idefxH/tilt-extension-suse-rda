@@ -156,19 +156,16 @@ def suse_app(
     pack_args.extend(['--path', '.'])
     pack_cmd = ' '.join(pack_args)
 
-    # Live update steps. Only interpreted languages (nodejs, python) use
-    # live_update by default; compiled languages rebuild via pack on each
-    # change. The cycle for live update is:
-    #   1. sync changed files from host to /workspace/ in the running container
-    #   2. (optional) run the language's reinstall command if a trigger fires
-    #   3. restart_container() — kill PID 1 so the CNB launcher relaunches
-    #      the process with the new code. Brings save->running from ~16s
-    #      (full pack build) down to ~1-2s (just kernel-level restart).
-    #
-    # For sub-second hot reload, the user can wire `node --watch` or
-    # uvicorn --reload via a custom Procfile, but that requires shipping
-    # the watcher in the prod image; restart_container() is the language-
-    # agnostic compromise.
+    # Live update steps. Only interpreted languages (nodejs, python) opt
+    # into live_update; compiled languages rebuild via pack on each change.
+    # The cycle is:
+    #   1. sync changed files host -> /workspace/ in the running container
+    #   2. (optional) reinstall step if its trigger fires (e.g. package.json)
+    # The container's process is launched via the Procfile's 'dev' entry
+    # (pack --default-process dev) which uses the language's native
+    # watcher (node --watch / uvicorn --reload / etc.) so no Tilt-side
+    # restart is needed. The Procfile's 'web' entry stays the production
+    # launch.
     live_update_steps = []
     for path in sync_paths:
         # CNB launchers (Heroku, Paketo) lay out source at /workspace.
@@ -178,20 +175,13 @@ def suse_app(
     install_trigger = defaults.get('live_update_install_trigger', [])
     if install_cmd and install_trigger:
         live_update_steps.append(run(install_cmd, trigger=install_trigger))
-    # Restart so the CNB launcher re-exec's the process with the synced code.
-    # restart_container() is marked deprecated for k8s in Tilt (the replacement
-    # is the restart_process extension). We keep it because:
-    #   1. It still works — the warning is informational, not a failure.
-    #   2. restart_process expects a wrapper at PID 1 that watches a sentinel
-    #      file and re-execs the inner process. CNB launchers (Heroku, Paketo)
-    #      already occupy PID 1 with their own re-exec logic, and overriding
-    #      that fights the buildpack contract.
-    #   3. The longer-term fix is either to adopt 'node --watch' / 'uvicorn
-    #      --reload' style hot-reloaders per language (no Tilt restart needed
-    #      at all) or to wait for Tilt to ship a custom_build_with_restart
-    #      that integrates with CNB launchers.
-    if sync_paths:
-        live_update_steps.append(restart_container())
+    # No restart_container() — we rely on the language's own watcher
+    # (node --watch, uvicorn --reload, ...) selected via pack_default_process
+    # in LANGUAGE_DEFAULTS. The CNB image's launcher runs the dev process
+    # which keeps an eye on /workspace/src/ and re-execs itself after each
+    # sync, sub-2s reload without Tilt's deprecated container restart.
+    # Languages whose runtime has no native watcher fall through to a
+    # custom_build rebuild on file change — slower but always correct.
 
     # Build deps: file paths Tilt watches. Empty sync_paths means "watch the
     # whole project" — rebuild on any change. With sync paths set, Tilt
