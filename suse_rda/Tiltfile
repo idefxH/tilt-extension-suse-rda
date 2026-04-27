@@ -179,6 +179,17 @@ def suse_app(
     if install_cmd and install_trigger:
         live_update_steps.append(run(install_cmd, trigger=install_trigger))
     # Restart so the CNB launcher re-exec's the process with the synced code.
+    # restart_container() is marked deprecated for k8s in Tilt (the replacement
+    # is the restart_process extension). We keep it because:
+    #   1. It still works — the warning is informational, not a failure.
+    #   2. restart_process expects a wrapper at PID 1 that watches a sentinel
+    #      file and re-execs the inner process. CNB launchers (Heroku, Paketo)
+    #      already occupy PID 1 with their own re-exec logic, and overriding
+    #      that fights the buildpack contract.
+    #   3. The longer-term fix is either to adopt 'node --watch' / 'uvicorn
+    #      --reload' style hot-reloaders per language (no Tilt restart needed
+    #      at all) or to wait for Tilt to ship a custom_build_with_restart
+    #      that integrates with CNB launchers.
     if sync_paths:
         live_update_steps.append(restart_container())
 
@@ -283,7 +294,7 @@ def main(parent_dir):
         os.makedirs(work)
         try:
             with tarfile.open(tgz, "r:gz") as tf:
-                tf.extractall(work)
+                tf.extractall(work, filter='data')  # py3.14+ requires explicit filter for tar safety
             inner = next(
                 (d for d in os.listdir(work) if os.path.isdir(os.path.join(work, d))),
                 None,

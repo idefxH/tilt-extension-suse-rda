@@ -61,7 +61,7 @@ def main(parent_dir):
         os.makedirs(work)
         try:
             with tarfile.open(tgz, "r:gz") as tf:
-                tf.extractall(work)
+                tf.extractall(work, filter='data')  # py3.14+ requires explicit filter for tar safety
             inner = next(
                 (d for d in os.listdir(work) if os.path.isdir(os.path.join(work, d))),
                 None,
