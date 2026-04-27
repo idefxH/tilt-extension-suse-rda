@@ -1,16 +1,10 @@
-# Minimal example of suse_app() consumption. Run with `tilt up` from this
-# directory after `helm dependency update` (none here) or just go straight
-# to `tilt up`. Requires pack, helm, and a running k8s cluster.
-
-# In production use, load from the published GitHub raw URL:
-# load_dynamic('https://raw.githubusercontent.com/idefxH/tilt-extension-suse-rda/main/Tiltfile')
-
-# For development against the extension repo locally:
-include('../../Tiltfile')
+# Local dev: include the extension directly so changes to ../../suse_rda/Tiltfile
+# are picked up without going through Tilt's repo-fetch cache.
+include('../../suse_rda/Tiltfile')
 
 suse_app(
     name='hello',
     language='nodejs',
     port=8080,
-    services={},  # no service binding for this minimal example
+    services={},
 )
