@@ -45,21 +45,24 @@ LANGUAGE_DEFAULTS = {
     'nodejs': {
         # heroku/nodejs in v5+ is a unified single buildpack that handles
         # engine resolution + npm install internally. The previous
-        # sub-buildpacks (heroku/nodejs-engine, -npm-engine, -npm-install)
-        # are deprecated in v5: the lifecycle DETECT phase reports
-        # 'Usage of \`heroku/nodejs-engine\` is deprecated... Equivalent
-        # functionality is now provided by the heroku/nodejs buildpack'.
+        # sub-buildpacks are deprecated in v5.
         # Requires a committed package-lock.json so heroku/nodejs runs
         # npm ci (the bundle template ships one).
-        # heroku/procfile reads ./Procfile to register the default 'web'
-        # process — heroku/nodejs 5.x doesn't auto-detect scripts.start.
+        # heroku/procfile reads ./Procfile to register processes —
+        # 'web' for prod, 'dev' for tilt builds (nodemon -L src/index.js).
         'buildpacks': ['heroku/nodejs', 'heroku/procfile'],
         'live_update_paths': ['./src'],
         'live_update_install_trigger': ['./package.json', './package-lock.json'],
         'live_update_install_cmd': 'cd /workspace && npm install --production=false',
-        # Tilt builds use Procfile's 'dev' process (node --watch). Production
-        # builds (pack run without this flag) default to 'web'.
+        # Tilt builds run the 'dev' process (nodemon -L src/index.js).
+        # nodemon polls every 1s — robust against containerd/overlayfs
+        # inotify quirks that break node --watch in some k8s setups.
+        # Production builds (no --default-process flag) default to 'web'.
         'pack_default_process': 'dev',
+        # Force NODE_ENV=development at build so heroku/nodejs runs
+        # 'npm ci' instead of 'npm ci --omit=dev' and includes nodemon
+        # (which is in devDependencies of the template package.json).
+        'pack_build_env': {'NODE_ENV': 'development'},
     },
     'python': {
         'buildpacks': ['heroku/python'],
