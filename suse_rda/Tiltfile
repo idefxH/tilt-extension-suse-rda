@@ -43,13 +43,20 @@ DEFAULT_BUILDER = 'heroku/builder:24'
 # pack on file change, with Paketo's layer cache providing the speed-up.
 LANGUAGE_DEFAULTS = {
     'nodejs': {
-        # heroku/procfile parses ./Procfile so the resulting image gets a
-        # default 'web' process. heroku/nodejs alone (5.x) doesn't auto-
-        # detect package.json's scripts.start any more, so without procfile
-        # the launcher fails: 'when there is no default process a command
-        # is required'. Order matters: nodejs first (provides node+modules),
-        # then procfile (declares the launch command).
-        'buildpacks': ['heroku/nodejs', 'heroku/procfile'],
+        # heroku/nodejs is a META-buildpack. When passed to pack via
+        # --buildpack, pack treats it as a single id and does NOT expand
+        # its order group, so the sub-buildpacks (npm-install in particular)
+        # never run, and the resulting image has no node_modules:
+        #   Error: Cannot find module 'express' at /workspace/src/index.js
+        # We list the sub-buildpacks explicitly. heroku/procfile reads
+        # ./Procfile to register the default 'web' process. heroku/nodejs
+        # 5.x dropped automatic detection of package.json scripts.start.
+        'buildpacks': [
+            'heroku/nodejs-engine',
+            'heroku/nodejs-npm-engine',
+            'heroku/nodejs-npm-install',
+            'heroku/procfile',
+        ],
         'live_update_paths': ['./src'],
         'live_update_install_trigger': ['./package.json', './package-lock.json'],
         'live_update_install_cmd': 'cd /workspace && npm install --production=false',
