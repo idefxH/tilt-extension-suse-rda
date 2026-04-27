@@ -57,6 +57,9 @@ LANGUAGE_DEFAULTS = {
         'live_update_paths': ['./src'],
         'live_update_install_trigger': ['./package.json', './package-lock.json'],
         'live_update_install_cmd': 'cd /workspace && npm install --production=false',
+        # Tilt builds use Procfile's 'dev' process (node --watch). Production
+        # builds (pack run without this flag) default to 'web'.
+        'pack_default_process': 'dev',
     },
     'python': {
         'buildpacks': ['heroku/python'],
@@ -153,6 +156,12 @@ def suse_app(
         pack_args.extend(['--buildpack', bp])
     for k, v in additional_env.items():
         pack_args.extend(['--env', '%s=%s' % (k, v)])
+    # Per-language opt-in: select the Procfile's dev process so the CNB
+    # launcher runs e.g. 'node --watch src/index.js'. The runtime then
+    # re-execs itself on each Tilt sync without restart_container().
+    dev_proc = defaults.get('pack_default_process')
+    if dev_proc:
+        pack_args.extend(['--default-process', dev_proc])
     pack_args.extend(['--path', '.'])
     pack_cmd = ' '.join(pack_args)
 
