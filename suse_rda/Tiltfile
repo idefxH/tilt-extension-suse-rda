@@ -158,11 +158,18 @@ def suse_app(
 
     # Helm install. Renders the chart at chart_path with the given values
     # files, applies the resulting manifests to the cluster.
+    #
+    # Run `helm dependency update` first so any oci:// or https:// sub-charts
+    # declared in Chart.yaml are pulled into charts/. Without this step,
+    # sub-charts like the AppCo Postgres chart at oci://dp.apps.rancher.io/
+    # charts/postgresql aren't fetched and helm() fails with a missing-
+    # dependency error. Requires `helm registry login dp.apps.rancher.io`
+    # (one-time, typically wired by the AppCo Rancher Desktop extension).
+    local('helm dependency update ' + chart_path + ' 2>&1', echo_off=True, quiet=False)
     k8s_yaml(helm(
         chart_path,
         name=name,
         values=chart_values_files,
-        dependency_update=True,  # resolves AppCo OCI sub-charts at deploy time
     ))
 
     # Surface the application Service on the requested port. Convention:
