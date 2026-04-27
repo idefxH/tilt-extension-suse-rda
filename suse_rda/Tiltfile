@@ -201,6 +201,14 @@ def suse_app(
     #      recursive dep-update step.
     # If the user introduces a non-vendored top-level dep later, they should
     # vendor it (rda convention) or run helm dep update themselves.
+    # Embed the chart-version aligning helper inline. Writing it to
+    # /tmp at runtime avoids the path-discovery problem with extensions
+    # loaded via ext://. Read the file contents at load time so the
+    # script ships with the extension.
+    align_script_path = '/tmp/_suse_rda_align_subchart_versions.py'
+    align_script_src = read_file('_align_subchart_versions.py')
+    local('cat > ' + align_script_path + " <<'__SUSE_RDA_PY_EOF__'\n" + align_script_src + "\n__SUSE_RDA_PY_EOF__", echo_off=True, quiet=True)
+
     helm_dep_script = (
         'set -e; ' +
         'if [ -d "' + chart_path + '/charts" ]; then ' +
@@ -209,6 +217,15 @@ def suse_app(
         '    if [ -f "$sub/Chart.yaml" ] && grep -q "^dependencies:" "$sub/Chart.yaml"; then ' +
         '      echo "[suse_rda] helm dep update $sub"; ' +
         '      helm dependency update "$sub"; ' +
+        # AppCo packaging quirk: their Helm charts publish OCI artifact
+        # tags like "0.4.4-29.1" but Chart.yaml inside says version
+        # "0.4.4". Helm matches deps against the INTERNAL version, so
+        # when the library declares postgresql at "0.4.4-29.1" the alias
+        # silently fails to resolve at template time and parent values
+        # never reach the sub-chart (no app user, no auth db). Patch
+        # each pulled sub-chart to align its internal version with what
+        # the parent expects. Drop when AppCo aligns version<->tag.
+        '      python3 "' + align_script_path + '" "$sub"; ' +
         '    fi; ' +
         '  done; ' +
         'fi'
