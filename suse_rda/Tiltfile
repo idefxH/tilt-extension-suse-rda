@@ -432,24 +432,37 @@ if __name__ == "__main__":
     #
     # Auto-discover ingress hosts from the project's values.yaml so the
     # Tilt resource card shows clickable Ingress links alongside the
-    # port-forward. Reads the first values file's `suse-library.ingress`
-    # block — matches the bundle's convention. If the user has a custom
-    # values file layout, they can still add `links=...` themselves
-    # after suse_app() returns.
-    extra_links = []
+    # port-forward. Reads `suse-library.ingress` for the app, and each
+    # sub-chart's own ingress block for the services (grafana follows
+    # the standard `<chart>.ingress` shape; prometheus puts it under
+    # `<chart>.server.ingress`). User-defined values files override
+    # these via Tilt's standard --values stacking.
+    parsed_values = []
     for vfile in chart_values_files:
-        cfg = read_yaml(vfile, default={})
-        ing = cfg.get('suse-library', {}).get('ingress', {})
-        if ing.get('enabled'):
-            scheme = 'https' if ing.get('tls') else 'http'
-            for host in ing.get('hosts', []):
-                extra_links.append(link(scheme + '://' + host, host))
+        parsed_values.append(read_yaml(vfile, default={}))
+
+    def _ingress_links(block):
+        ing = block.get('ingress', {}) if block else {}
+        if not ing.get('enabled'):
+            return []
+        scheme = 'https' if ing.get('tls') else 'http'
+        return [link(scheme + '://' + host, host) for host in ing.get('hosts', [])]
+
+    def _suse_lib_block(values_dict, *path):
+        block = values_dict.get('suse-library', {}) or {}
+        for key in path:
+            block = (block.get(key, {}) or {}) if hasattr(block, 'get') else {}
+        return block
+
+    app_links = []
+    for cfg in parsed_values:
+        app_links.extend(_ingress_links(cfg.get('suse-library', {}) or {}))
 
     k8s_resource(
         workload=name,
         port_forwards='%d:%d' % (port, port),
         labels=[labels.get(name, 'app')],
-        links=extra_links,
+        links=app_links,
     )
 
     # Surface each declared service on its conventional port. Workload name
@@ -463,12 +476,24 @@ if __name__ == "__main__":
     # is what the K8s API uses.
     for binding_name, service_type in services.items():
         workload = name + '-' + binding_name
+
+        # Sub-chart ingress lookup. Grafana uses <chart>.ingress (flat).
+        # Prometheus is special: the upstream chart puts the server
+        # ingress under <chart>.server.ingress. Add more service types
+        # here as the bundle grows.
+        svc_links = []
+        for cfg in parsed_values:
+            svc_links.extend(_ingress_links(_suse_lib_block(cfg, service_type)))
+            if service_type == 'prometheus':
+                svc_links.extend(_ingress_links(_suse_lib_block(cfg, service_type, 'server')))
+
         if service_type in SERVICE_PORTS:
             svc_port = SERVICE_PORTS[service_type]
             k8s_resource(
                 workload=workload,
                 port_forwards='%d:%d' % (svc_port, svc_port),
                 labels=[labels.get(workload, 'services')],
+                links=svc_links,
             )
         else:
             # Unknown type: register the workload but skip port-forward.
@@ -477,4 +502,5 @@ if __name__ == "__main__":
             k8s_resource(
                 workload=workload,
                 labels=[labels.get(workload, 'services')],
+                links=svc_links,
             )
