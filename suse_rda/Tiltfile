@@ -371,11 +371,47 @@ if __name__ == "__main__":
     # Chart.lock. Tilt watches the project tree by default; without these
     # ignores every helm dep update triggers a reload that re-runs helm dep
     # update -> infinite loop.
+    # Tilt watches the project tree by default and reloads the Tiltfile
+    # whenever a watched file changes — including running helm dep update
+    # + alignment + helm template again. That defeats live_update for app
+    # source changes, which should only trigger a sync (and the runtime
+    # watcher's restart). Aggressively ignore everything that doesn't
+    # affect helm rendering: the app source, language package locks,
+    # node_modules, git/CI metadata, and helm-managed dynamic paths.
     watch_settings(ignore=[
+        # Helm-managed dynamic paths (avoids infinite reload loops on
+        # helm dep update output).
         chart_path + '/charts/*/charts',
         chart_path + '/charts/*/tmpcharts-*',
         chart_path + '/charts/*/Chart.lock',
         chart_path + '/Chart.lock',
+        # App source — handled by live_update sync, not Tiltfile reload.
+        chart_path + '/src',
+        chart_path + '/app',
+        chart_path + '/lib',
+        chart_path + '/test',
+        chart_path + '/tests',
+        # Language/package manifests other than the chart's. Changes here
+        # only matter for the live_update install_trigger, not for the
+        # helm rendering.
+        chart_path + '/package-lock.json',
+        chart_path + '/yarn.lock',
+        chart_path + '/pnpm-lock.yaml',
+        chart_path + '/Pipfile.lock',
+        chart_path + '/poetry.lock',
+        chart_path + '/Gemfile.lock',
+        chart_path + '/go.sum',
+        chart_path + '/Cargo.lock',
+        # Vendor / build / cache directories.
+        chart_path + '/node_modules',
+        chart_path + '/.tilt',
+        chart_path + '/.tiltbuild',
+        chart_path + '/.git',
+        chart_path + '/.idea',
+        chart_path + '/.vscode',
+        # Common backup / OS noise.
+        chart_path + '/*.bak',
+        chart_path + '/.DS_Store',
     ])
 
     k8s_yaml(helm(
