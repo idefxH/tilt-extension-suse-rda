@@ -102,7 +102,7 @@ def suse_app(
         language,
         port=8080,
         services={},
-        chart_path='.',
+        chart_path='chart',
         chart_values_files=['values.yaml'],
         builder_image=None,
         extra_buildpacks=[],
