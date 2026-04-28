@@ -345,14 +345,32 @@ if __name__ == "__main__":
 '''
     local('cat > ' + align_script_path + " <<'__SUSE_RDA_PY_EOF__'\n" + align_script_src + "\n__SUSE_RDA_PY_EOF__", echo_off=True, quiet=True)
 
+    # Speed: skip helm dep update when the cache is fresh.
+    #   - --skip-refresh: don't update the 15+ helm repos (metallb, harbor,
+    #     longhorn, rancher, ...). Wasted work because our deps use oci://
+    #     URLs that bypass helm's repo cache entirely.
+    #   - "Chart.lock newer than Chart.yaml + charts/*.tgz exists" guard:
+    #     skip the dep update + alignment loop entirely. Saves ~5-15s per
+    #     Tiltfile reload — these reloads happen on every save in the chart
+    #     tree, so the win compounds. helm dep build would be even faster
+    #     but requires a lock; we keep `update --skip-refresh` for the
+    #     first-run / after-upgrade case where the lock isn't present yet.
     helm_dep_script = (
         'set -e; ' +
         'if [ -d "' + chart_path + '/charts" ]; then ' +
         '  for sub in "' + chart_path + '"/charts/*/; do ' +
         '    [ -d "$sub" ] || continue; ' +
-        '    if [ -f "$sub/Chart.yaml" ] && grep -q "^dependencies:" "$sub/Chart.yaml"; then ' +
-        '      echo "[suse_rda] helm dep update $sub"; ' +
-        '      helm dependency update "$sub"; ' +
+        '    [ -f "$sub/Chart.yaml" ] || continue; ' +
+        '    grep -q "^dependencies:" "$sub/Chart.yaml" || continue; ' +
+        # Fast-path: lock fresh AND charts/ populated -> skip update.
+        '    if [ -f "$sub/Chart.lock" ] && [ "$sub/Chart.lock" -nt "$sub/Chart.yaml" ] && ' +
+        '       [ -d "$sub/charts" ] && [ -n "$(ls -A "$sub/charts" 2>/dev/null)" ]; then ' +
+        '      echo "[suse_rda] $sub deps up to date, skipping helm dep update"; ' +
+        '      python3 "' + align_script_path + '" "$sub"; ' +
+        '      continue; ' +
+        '    fi; ' +
+        '    echo "[suse_rda] helm dep update --skip-refresh $sub"; ' +
+        '    helm dependency update --skip-refresh "$sub"; ' +
         # AppCo packaging quirk: their Helm charts publish OCI artifact
         # tags like "0.4.4-29.1" but Chart.yaml inside says version
         # "0.4.4". Helm matches deps against the INTERNAL version, so
@@ -361,8 +379,7 @@ if __name__ == "__main__":
         # never reach the sub-chart (no app user, no auth db). Patch
         # each pulled sub-chart to align its internal version with what
         # the parent expects. Drop when AppCo aligns version<->tag.
-        '      python3 "' + align_script_path + '" "$sub"; ' +
-        '    fi; ' +
+        '    python3 "' + align_script_path + '" "$sub"; ' +
         '  done; ' +
         'fi'
     )
