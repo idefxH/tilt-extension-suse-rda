@@ -103,7 +103,7 @@ def suse_app(
         port=8080,
         services={},
         chart_path='chart',
-        chart_values_files=['values.yaml'],
+        chart_values_files=None,
         builder_image=None,
         extra_buildpacks=[],
         additional_env={},
@@ -127,7 +127,9 @@ def suse_app(
         chart_path (str): path to the Helm chart relative to the Tiltfile.
             Default '.' (current directory).
         chart_values_files (list[str]): values files passed to helm. Default
-            ['values.yaml'].
+            [chart_path + '/values.yaml'] (so values.yaml is resolved inside
+            the chart directory). Override with paths relative to the Tiltfile
+            if your project keeps values somewhere else.
 
     Override:
         builder_image (str): CNB builder image. Default Paketo full builder.
@@ -394,6 +396,12 @@ if __name__ == "__main__":
         chart_path + '/charts/*/Chart.lock',
         chart_path + '/Chart.lock',
     ])
+
+    # Default values file follows chart_path. Bundle v0.8+ ships values.yaml
+    # under chart/, so when chart_path='chart' the defaults are 'chart/values.yaml'.
+    # Users overriding chart_values_files pass paths relative to the Tiltfile.
+    if chart_values_files == None:
+        chart_values_files = [chart_path + '/values.yaml']
 
     k8s_yaml(helm(
         chart_path,
