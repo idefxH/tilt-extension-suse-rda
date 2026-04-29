@@ -9,14 +9,21 @@
 #
 #   load_dynamic('https://raw.githubusercontent.com/idefxH/tilt-extension-suse-rda/main/Tiltfile')
 #   suse_app(
-#       name='payment-service',
+#       name='my-app',
 #       language='nodejs',
 #       port=8080,
-#       services={'database': 'postgresql'},
 #   )
 #
 # That replaces ~30 lines of docker_build / helm / k8s_resource boilerplate
-# with one call. Override builder_image when SUSE-AppCo buildpacks ship.
+# with one call. Service port-forwards are auto-discovered from
+# chart/values.yaml: every `suse-library.services[]` entry (the unified
+# DSL written by `rda add-service`) and every legacy `<chart>.enabled: true`
+# under suse-library is registered. Override builder_image when SUSE-AppCo
+# buildpacks ship.
+#
+# Pass `services={'<binding>': '<type>'}` explicitly only when you want to
+# register a service the chart doesn't deploy itself, or narrow the
+# auto-discovered set to a subset.
 
 # Heroku CNB builder. Multi-arch (linux/amd64 + linux/arm64) so the
 # buildpack inner loop runs natively on Apple Silicon — no Rosetta, no
@@ -101,7 +108,7 @@ def suse_app(
         name,
         language,
         port=8080,
-        services={},
+        services=None,
         chart_path='chart',
         chart_values_files=None,
         builder_image=None,
@@ -120,10 +127,19 @@ def suse_app(
 
     Common:
         port (int): HTTP port exposed by the app container. Default 8080.
-        services (dict): map of service binding name -> service type. The
+        services (dict|None): map of service binding name -> service type. The
             service type must be one of SERVICE_PORTS keys to get a default
             port-forward; unknown types still get a workload entry but no
             port-forward. Example: {'database': 'postgresql'}.
+            **When None (default), services are auto-discovered from
+            chart_values_files** — every entry in `suse-library.services[]`
+            (the unified DSL) and every chart with `suse-library.<chart>.enabled:
+            true` (the legacy gate) is registered. This is the recommended
+            mode: `rda add-service <type> <binding>` updates values.yaml,
+            and Tilt picks up the change on the next reload — nothing in the
+            Tiltfile needs to be in lockstep with values.yaml.
+            Pass an explicit dict to opt out of auto-discovery (e.g. to
+            register a service the chart doesn't deploy itself).
         chart_path (str): path to the Helm chart relative to the Tiltfile.
             Default '.' (current directory).
         chart_values_files (list[str]): values files passed to helm. Default
@@ -440,6 +456,44 @@ if __name__ == "__main__":
     parsed_values = []
     for vfile in chart_values_files:
         parsed_values.append(read_yaml(vfile, default={}))
+
+    # Auto-discover services when the caller didn't pass an explicit dict.
+    # Two layers, in this order:
+    #   1. DSL: suse-library.services[] — each entry has {binding, type}
+    #      and is mapped to (binding -> type). The DSL is the future.
+    #   2. Legacy: suse-library.<chart>.enabled: true — each enabled
+    #      catalogued chart is mapped to (chart -> chart) for back-compat
+    #      with bundles <= v0.9 that didn't have services[].
+    # An explicit `services={...}` argument disables auto-discovery so a
+    # caller can register services the chart doesn't deploy itself, or
+    # narrow the surface to a subset.
+    if services == None:
+        services = {}
+        # Catalogued chart names from CATALOG.md — we only auto-register
+        # legacy entries whose chart name is in this set, so a typo or a
+        # custom chart in values.yaml doesn't silently turn into a
+        # phantom port-forward.
+        legacy_charts = ['postgresql', 'redis', 'grafana', 'prometheus',
+                         'mariadb', 'mongodb', 'kafka', 'rabbitmq', 'nats']
+        for cfg in parsed_values:
+            lib = (cfg.get('suse-library', {}) or {}) if cfg else {}
+            # 1. DSL path
+            for entry in (lib.get('services') or []):
+                binding = entry.get('binding')
+                stype = entry.get('type')
+                provisioning = entry.get('provisioning', 'local')
+                # Skip external — no in-cluster Service to forward.
+                if provisioning == 'external':
+                    continue
+                if binding and stype:
+                    services[binding] = stype
+            # 2. Legacy path (only when DSL is empty for this file —
+            # mirrors the helper's binding-secret.yaml XOR branch)
+            if not (lib.get('services') or []):
+                for chart in legacy_charts:
+                    block = lib.get(chart, {}) or {}
+                    if block.get('enabled'):
+                        services.setdefault(chart, chart)
 
     def _ingress_links(block):
         ing = block.get('ingress', {}) if block else {}
