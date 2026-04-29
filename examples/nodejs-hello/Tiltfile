@@ -6,5 +6,6 @@ suse_app(
     name='hello',
     language='nodejs',
     port=8080,
-    services={},
+    # services= defaults to None → auto-discovered from chart/values.yaml
+    # (suse-library.services[] DSL + legacy <chart>.enabled).
 )

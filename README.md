@@ -20,16 +20,16 @@ v1alpha1.extension(
 load('ext://suse-rda', 'suse_app')
 
 suse_app(
-    name='payment-service',
+    name='my-app',
     language='nodejs',
     port=8080,
-    services={'database': 'postgresql'},
 )
 ```
 
 That replaces ~30 lines of `docker_build` / `helm` / `k8s_resource` boilerplate
-with one call. Tilt fetches and caches the extension repo automatically;
-restart Tilt to pick up updates.
+with one call. **Service port-forwards are auto-discovered from `chart/values.yaml`** — every entry under `suse-library.services[]` (the unified DSL written by `rda add-service`) and every legacy `suse-library.<chart>.enabled: true` is registered. Nothing in the Tiltfile needs to be in lockstep with values.yaml.
+
+Pass `services={'<binding>': '<type>'}` only when you want to register a service the chart doesn't deploy itself, or narrow the auto-discovered set to a subset. Tilt fetches and caches the extension repo automatically; restart Tilt to pick up updates.
 
 ## Prerequisites
 
@@ -64,8 +64,9 @@ extension in a repo lives in a subdirectory named after itself.
 
 ## Conventional service ports
 
-For services declared in `services={...}`, the extension forwards the
-canonical local port:
+For each service auto-discovered from `chart/values.yaml` (or passed
+explicitly via `services={...}`), the extension forwards the canonical
+local port:
 
 | Service type | Local port |
 |---|---|
