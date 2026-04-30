@@ -189,10 +189,15 @@ def suse_app(
     # Final fallback to 'chart' for projects with neither directory yet
     # (preserves the historical default so existing tests / fixtures keep
     # working).
+    # Note: Tilt's Starlark `os.path` exposes `exists()` but NOT `isdir()`
+    # (verified at runtime — the latter raises 'module has no .isdir field
+    # or method'). We probe for `<dir>/Chart.yaml` instead, which is a
+    # tighter signal anyway: a deploy/ or chart/ that doesn't carry a
+    # Chart.yaml is useless to helm regardless of its directory-ness.
     if chart_path == None:
-        if os.path.isdir('deploy'):
+        if os.path.exists('deploy/Chart.yaml'):
             chart_path = 'deploy'
-        elif os.path.isdir('chart'):
+        elif os.path.exists('chart/Chart.yaml'):
             chart_path = 'chart'
         else:
             chart_path = 'chart'
