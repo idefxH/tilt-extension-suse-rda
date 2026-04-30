@@ -27,7 +27,11 @@ suse_app(
 ```
 
 That replaces ~30 lines of `docker_build` / `helm` / `k8s_resource` boilerplate
-with one call. **Service port-forwards are auto-discovered from `chart/values.yaml`** — every entry under `suse-library.services[]` (the unified DSL written by `rda add-service`) and every legacy `suse-library.<chart>.enabled: true` is registered. Nothing in the Tiltfile needs to be in lockstep with values.yaml.
+with one call. **Service port-forwards are auto-discovered from `chart/values.yaml`** — every entry under `suse-library.services[]` with `provisioning: local` AND a matching `<chart>.enabled: true` gets a port-forward registered. The Tiltfile stays in lockstep with `values.yaml` automatically; you don't list services in two places.
+
+Entries with `provisioning: shared` or `provisioning: external` are skipped (no in-cluster workload to forward). Entries whose sub-chart is not enabled are also skipped (no workload deployed).
+
+The pre-DSL legacy auto-discovery (`<chart>.enabled` without `services[]`) was dropped in v0.2.0 alongside bundle v0.10+. If you're on a bundle ≤ v0.9, either upgrade the bundle or pin the extension to its 0.1.x line.
 
 Pass `services={'<binding>': '<type>'}` only when you want to register a service the chart doesn't deploy itself, or narrow the auto-discovered set to a subset. Tilt fetches and caches the extension repo automatically; restart Tilt to pick up updates.
 
@@ -85,6 +89,55 @@ When the SUSE-AppCo buildpacks land, override the builder:
 ```python
 suse_app(..., builder_image='registry.suse.com/rda/builder:latest')
 ```
+
+## Where image-level gates fit (forward-looking)
+
+`suse_app(...)` is the right hook for **image-level gates** — checks
+that run at `pack build` time, before Tilt deploys anything to the
+cluster. These are Layer 1 of RDA's four-layer defense model. The
+canonical reference is [`rda-docs/concepts/gates.md`](https://github.com/idefxH/rda-docs/blob/main/concepts/gates.md);
+the anchor in the rda CLI spec is the `BEHAVIOR: promote` NOTES in
+[`rda-cli/rda.md`](https://github.com/idefxH/rda-cli/blob/main/rda.md)
+under "Layered-defense model".
+
+The four layers, scoped to what each can see:
+
+| Layer | When | Scope | Owner |
+|---|---|---|---|
+| 1. image-time | `pack build` | the app image | this extension (`suse_app`) + buildpack stack |
+| 2. template-time | every `helm template` | rendered DSL | `rda-opinion-bundle-example` library helpers |
+| 3. promote-time | `rda promote` | declared chart deps + rendered manifests | `rda` CLI |
+| 4. admission-time | cluster admission | live applies | cluster operator's Kubewarden policies |
+
+Each layer catches what only it can see; later layers exist as
+defense in depth, not as substitutes. A buildpack-time CVE check
+cannot see `services[].type=mongodb`; a promote-time
+`forbidden_charts` gate cannot see an unsigned base image.
+
+### Planned Layer 1 gates
+
+Scoped to the app image only:
+
+- **CVE scan** — fail the build if grype/trivy finds critical or
+  high CVEs in the app's deps or base layer. Severity threshold
+  configurable via the corp overlay.
+- **Image signature** — verify (or produce) a cosign signature
+  against the corp KMS key. Pairs with Layer 3's `cosign_verify`
+  for AppCo sub-chart images.
+- **SBOM emission** — paketo already produces SBOMs; the extension
+  surfaces them as a Tilt artefact and stages them for the
+  promotion record.
+- **License scan** — fail on copyleft licenses if the corp overlay
+  forbids them.
+
+### Status
+
+Spec-only today: `suse_app(...)` does not yet take gate-related
+flags. Tracking issue: idefxH/tilt-extension-suse-rda#1 (to be
+filed). The promote-time and template-time layers are already
+shipping; this layer comes online when the SUSE-AppCo buildpacks
+do, since the corp-curated image gates need a corp-curated builder
+to run inside.
 
 ## License
 
