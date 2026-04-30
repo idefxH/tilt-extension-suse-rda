@@ -445,6 +445,46 @@ if __name__ == "__main__":
     if chart_values_files == None:
         chart_values_files = [chart_path + '/values.yaml']
 
+    # ─── Namespace resolution (NS Phase A) ─────────────────────────────
+    # Read `.rda/project.yaml` for the namespace template, expand the
+    # {{.project}} / {{.user}} tokens, pre-create the namespace, and pass
+    # --namespace to helm. Default `{{.project}}` for projects scaffolded
+    # before rda-cli v0.1.43 (no namespace block in project.yaml) — same
+    # default as `rda new` itself, so behaviour matches a fresh scaffold
+    # without forcing legacy projects through `rda upgrade` first.
+    #
+    # The CLI persists only the literal template string; expansion happens
+    # here so a `git clone` on a different developer's box produces a
+    # different namespace without rewriting project.yaml. Spec source of
+    # truth: rda-cli/rda.md BEHAVIOR/new (namespace_template input) and
+    # rda-docs/concepts/namespaces.md.
+    project_meta = read_yaml('.rda/project.yaml', default={})
+    ns_template = ((project_meta.get('namespace', {}) or {}).get('local', '') or '{{.project}}')
+    # $USER is set by every interactive shell on macOS / Linux / WSL.
+    # Fall back to 'default' if somehow unset (e.g. CI without USER) so
+    # the template still resolves rather than failing at helm time.
+    user_value = str(local('echo "${USER:-default}"', quiet=True, echo_off=True)).strip() or 'default'
+    namespace = ns_template
+    for token, value in [('{{.project}}', name), ('{{ .project }}', name),
+                         ('{{.user}}', user_value), ('{{ .user }}', user_value)]:
+        namespace = namespace.replace(token, value)
+    if '{{' in namespace or '}}' in namespace:
+        fail((
+            'suse_app: namespace template %r contains an unrecognised token ' +
+            'after expansion (got %r). Allowed tokens: {{.project}}, {{.user}}. ' +
+            'Edit .rda/project.yaml namespace.local to fix.'
+        ) % (ns_template, namespace))
+
+    # Pre-create the namespace idempotently. Tilt invokes `helm template`
+    # (not `helm install --create-namespace`) so the namespace must exist
+    # before k8s_yaml applies the rendered manifests. `kubectl create
+    # --dry-run=client | kubectl apply` is idempotent — succeeds whether
+    # the namespace is new or already there.
+    local(
+        'kubectl create namespace ' + namespace +
+        ' --dry-run=client -o yaml | kubectl apply -f -',
+        quiet=True, echo_off=True)
+
     # ─── DSL projection (rda render) ────────────────────────────────────
     # Helm resolves sub-chart values BEFORE templates run, so the library
     # chart's _helpers.tpl can't inject services[].auth.user.name into
@@ -515,6 +555,7 @@ if __name__ == "__main__":
     k8s_yaml(helm(
         chart_path,
         name=name,
+        namespace=namespace,
         values=chart_values_files,
     ))
 
