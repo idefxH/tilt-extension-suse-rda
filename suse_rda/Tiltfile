@@ -11,15 +11,15 @@
 #   suse_app(
 #       name='my-app',
 #       language='nodejs',
-#       port=8080,
 #   )
 #
 # That replaces ~30 lines of docker_build / helm / k8s_resource boilerplate
 # with one call. Service port-forwards are auto-discovered from
 # chart/values.yaml: every `suse-library.services[]` entry (the unified
-# DSL written by `rda add-service`) and every legacy `<chart>.enabled: true`
-# under suse-library is registered. Override builder_image when SUSE-AppCo
-# buildpacks ship.
+# DSL written by `rda add-service`) is registered. The app's HTTP port is
+# read from `suse-library.port` in chart/values.yaml — values.yaml is the
+# source of truth, so the Tiltfile stays terse. Override builder_image when
+# SUSE-AppCo buildpacks ship.
 #
 # Pass `services={'<binding>': '<type>'}` explicitly only when you want to
 # register a service the chart doesn't deploy itself, or narrow the
@@ -107,7 +107,7 @@ SERVICE_PORTS = {
 def suse_app(
         name,
         language,
-        port=8080,
+        port=None,
         services=None,
         chart_path='chart',
         chart_values_files=None,
@@ -126,7 +126,16 @@ def suse_app(
             default buildpacks and live-update behaviour.
 
     Common:
-        port (int): HTTP port exposed by the app container. Default 8080.
+        port (int|None): HTTP port exposed by the app container. **Default
+            None — derived from `suse-library.port` in chart/values.yaml.**
+            The library chart already reads `.Values.port` as the
+            container's port AND the Service's targetPort, so values.yaml
+            is the source of truth. Don't pass this argument unless you
+            need to override; if you pass a value that mismatches
+            values.yaml, the Tiltfile fails fast (forcing the dev to fix
+            the duplication rather than carry two drifting numbers). When
+            values.yaml has no `suse-library.port` entry, falls back to
+            the library chart's own default of 8080.
         services (dict|None): map of service binding name -> service type. The
             service type must be one of SERVICE_PORTS keys to get a default
             port-forward; unknown types still get a workload entry but no
@@ -523,6 +532,35 @@ if __name__ == "__main__":
     parsed_values = []
     for vfile in chart_values_files:
         parsed_values.append(read_yaml(vfile, default={}))
+
+    # Derive `port` from chart/values.yaml when the caller didn't pass one.
+    # The library chart's deployment.yaml renders `containerPort: {{ .Values.port }}`
+    # and the Service maps Service.targetPort to the same value, so
+    # `suse-library.port` is the canonical container port. Reading it
+    # here keeps the Tiltfile DRY: callers don't have to remember to set
+    # the same number in two places. Closes the same drift class as
+    # rda-cli#65 (single source of truth).
+    #
+    # Resolution order (last wins, matches Helm's --values stacking):
+    #   1. library chart default (8080)
+    #   2. user's chart/values.yaml suse-library.port
+    #   3. user-overridden values files
+    #   4. explicit port=NNN in suse_app(...) — fails fast on mismatch
+    discovered_port = 8080
+    for cfg in parsed_values:
+        lib = (cfg.get('suse-library', {}) or {}) if cfg else {}
+        if 'port' in lib:
+            discovered_port = lib['port']
+    if port == None:
+        port = discovered_port
+    elif port != discovered_port:
+        fail((
+            'suse_app: port=%d passed explicitly but chart/values.yaml has ' +
+            'suse-library.port=%d. The two would drift on every edit. ' +
+            'Drop the port argument from suse_app(...) — values.yaml is the ' +
+            'source of truth (see rda-docs/concepts/dsl.md). If you really ' +
+            'need to override, change values.yaml.'
+        ) % (port, discovered_port))
 
     # Auto-discover services from `suse-library.services[]` (the unified
     # DSL in bundle v0.10+). Each entry has {binding, type, provisioning}
