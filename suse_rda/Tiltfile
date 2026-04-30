@@ -436,6 +436,56 @@ if __name__ == "__main__":
     if chart_values_files == None:
         chart_values_files = [chart_path + '/values.yaml']
 
+    # ─── DSL projection (rda render) ────────────────────────────────────
+    # Helm resolves sub-chart values BEFORE templates run, so the library
+    # chart's _helpers.tpl can't inject services[].auth.user.name into
+    # postgresql.auth.username at template time. The projection has to
+    # happen out of band — `rda render` does it pre-helm. We call it here,
+    # right before `helm(...)`, so chart/values.generated.yaml is fresh
+    # for every tilt up. Spec: idefxH/rda-cli/rda.md BEHAVIOR: render.
+    # Closes idefxH/rda-opinion-bundle-example#66.
+    #
+    # Wiring choices:
+    #   - We call `rda render` (NOT --check) at every tilt up. Generating
+    #     is fast (millisecond-class for typical projects); --check would
+    #     just defer the same work to a second invocation if it found
+    #     drift. CI is the right place for --check.
+    #   - The generated overlay is APPENDED to chart_values_files so helm
+    #     reads the user's values + the projection. Order matters: user
+    #     values first (they're the truth), generated overlay second
+    #     (Helm's value-merge convention is later-wins, which is what we
+    #     want — the projected values_mapping output overrides any stale
+    #     manual entries the user may have left from before they adopted
+    #     `rda render`).
+    #   - Missing rda binary: graceful warning, no fail. Inner-loop dev
+    #     against an unreleased rda branch shouldn't be blocked. The
+    #     downstream helm template will fail loud anyway via
+    #     validateConsistency if the user hasn't manually maintained the
+    #     equivalent values.
+    rda_present = str(local(
+        'command -v rda > /dev/null 2>&1 && echo present || echo missing',
+        quiet=True, echo_off=True)).strip()
+    if rda_present == 'present':
+        # Run from chart_path's parent: `rda render` resolves the project
+        # via cwd, and the project's chart_dir is computed relative to
+        # the .rda/project.yaml location.
+        local('rda render', quiet=True, echo_off=False)
+        generated_overlay = chart_path + '/values.generated.yaml'
+        # Only append when render actually produced the file (it does
+        # unconditionally — see render.go's writeAtomic — but stay
+        # defensive in case the user is on an older rda binary that
+        # predates BEHAVIOR: render).
+        if os.path.exists(generated_overlay):
+            # De-dup: if the user already passed values.generated.yaml in
+            # chart_values_files, don't add it twice (Helm tolerates dup
+            # files but the warning would confuse).
+            if generated_overlay not in chart_values_files:
+                chart_values_files = chart_values_files + [generated_overlay]
+    else:
+        print('suse_rda: warning — `rda` not on PATH; chart/values.generated.yaml ' +
+              'will not be regenerated. Install rda CLI to keep services[] DSL ' +
+              'in sync with sub-chart values. See idefxH/rda-cli.')
+
     k8s_yaml(helm(
         chart_path,
         name=name,
