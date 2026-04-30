@@ -721,7 +721,25 @@ if __name__ == "__main__":
         if not ing.get('enabled'):
             return []
         scheme = 'https' if ing.get('tls') else 'http'
-        return [link(scheme + '://' + host, host) for host in ing.get('hosts', [])]
+        # Two ingress.hosts shapes in the wild:
+        #   - simple list of strings: ["app.localtest.me"]   (grafana,
+        #     prometheus, the app-level ingress block)
+        #   - rich list of objects:   [{host: "...", paths: [...]}]
+        #     (dex chart 0.24+, others that need per-host path matching)
+        # Same Tilt UI link comes out either way — we just have to peel
+        # the host string out of the dict shape.
+        out = []
+        for h in ing.get('hosts', []):
+            if type(h) == "string":
+                host = h
+            elif type(h) == "dict":
+                host = h.get('host', '')
+            else:
+                continue
+            if not host:
+                continue
+            out.append(link(scheme + '://' + host, host))
+        return out
 
     def _suse_lib_block(values_dict, *path):
         block = values_dict.get('suse-library', {}) or {}
@@ -758,7 +776,16 @@ if __name__ == "__main__":
     catalogued_charts = mappings_doc.get('charts', {})
 
     def workload_name_for(release, service_type):
-        """Compute the rendered K8s workload name for a service type."""
+        """Compute the rendered K8s workload name for a service type.
+
+        dsl-mappings.yaml service.host is the FQDN since NS Phase C
+        (e.g. '<release>-postgresql.<ns>.svc.cluster.local') so that
+        cross-namespace shared bindings can resolve. But Tilt's
+        k8s_resource(workload=...) wants the SHORT NAME (the Service /
+        Deployment name within the namespace, e.g. '<release>-postgresql').
+        We render the template, then strip everything from the first '.'
+        onwards.
+        """
         chart_entry = catalogued_charts.get(service_type, {})
         versions = chart_entry.get('versions', [])
         if not versions:
@@ -772,7 +799,11 @@ if __name__ == "__main__":
         # dsl-mappings.yaml: just substitute {{ .Release.Name }} (with or
         # without spaces). Anything richer would need a real Go template
         # engine, which Starlark doesn't have.
-        return host_tpl.replace('{{ .Release.Name }}', release).replace('{{.Release.Name}}', release)
+        rendered = host_tpl.replace('{{ .Release.Name }}', release).replace('{{.Release.Name}}', release)
+        # Trim the FQDN suffix — Tilt workload names are short.
+        if '.' in rendered:
+            rendered = rendered.split('.', 1)[0]
+        return rendered
 
     seen_workloads = {}
     for binding_name, service_type in services.items():
