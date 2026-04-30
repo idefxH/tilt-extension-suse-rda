@@ -14,11 +14,13 @@
 #   )
 #
 # That replaces ~30 lines of docker_build / helm / k8s_resource boilerplate
-# with one call. Service port-forwards are auto-discovered from
-# chart/values.yaml: every `suse-library.services[]` entry (the unified
-# DSL written by `rda add-service`) is registered. The app's HTTP port is
-# read from `suse-library.port` in chart/values.yaml — values.yaml is the
-# source of truth, so the Tiltfile stays terse. Override builder_image when
+# with one call. Service port-forwards are auto-discovered from the
+# project's values.yaml (under deploy/ on bundle 0.11.13+ scaffolds, or
+# chart/ on older ones — chart_path defaults to auto-detection): every
+# `suse-library.services[]` entry (the unified DSL written by `rda
+# add-service`) is registered. The app's HTTP port is read from
+# `suse-library.port` in the same values.yaml — values.yaml is the source
+# of truth, so the Tiltfile stays terse. Override builder_image when
 # SUSE-AppCo buildpacks ship.
 #
 # Pass `services={'<binding>': '<type>'}` explicitly only when you want to
@@ -109,7 +111,7 @@ def suse_app(
         language,
         port=None,
         services=None,
-        chart_path='chart',
+        chart_path=None,
         chart_values_files=None,
         builder_image=None,
         extra_buildpacks=[],
@@ -149,8 +151,14 @@ def suse_app(
             Tiltfile needs to be in lockstep with values.yaml.
             Pass an explicit dict to opt out of auto-discovery (e.g. to
             register a service the chart doesn't deploy itself).
-        chart_path (str): path to the Helm chart relative to the Tiltfile.
-            Default '.' (current directory).
+        chart_path (str|None): path to the Helm chart relative to the Tiltfile.
+            **Default None — auto-detected.** Prefers 'deploy/' (the new
+            convention from bundle 0.11.13+ scaffolds, where the directory
+            name signals the directory's purpose: it's what gets deployed
+            to Kubernetes). Falls back to 'chart/' for projects scaffolded
+            before the rename. Pass a path explicitly to override (e.g.
+            'helm/' for a non-scaffold project, or 'chart' to force the
+            legacy name during migration).
         chart_values_files (list[str]): values files passed to helm. Default
             [chart_path + '/values.yaml'] (so values.yaml is resolved inside
             the chart directory). Override with paths relative to the Tiltfile
@@ -173,6 +181,21 @@ def suse_app(
     if language not in LANGUAGE_DEFAULTS:
         fail('suse_app: unsupported language %r. Supported: %s' % (
             language, ', '.join(sorted(LANGUAGE_DEFAULTS.keys()))))
+
+    # Auto-detect chart_path when caller didn't pass one. Prefer deploy/
+    # (bundle template 0.11.13+ scaffolds) and fall back to chart/ (older
+    # scaffolds). Project Tiltfiles that pass chart_path='chart' or
+    # chart_path='deploy' explicitly bypass this — explicit always wins.
+    # Final fallback to 'chart' for projects with neither directory yet
+    # (preserves the historical default so existing tests / fixtures keep
+    # working).
+    if chart_path == None:
+        if os.path.isdir('deploy'):
+            chart_path = 'deploy'
+        elif os.path.isdir('chart'):
+            chart_path = 'chart'
+        else:
+            chart_path = 'chart'
 
     defaults = LANGUAGE_DEFAULTS[language]
     builder = builder_image or DEFAULT_BUILDER
