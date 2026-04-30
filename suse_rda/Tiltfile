@@ -457,43 +457,41 @@ if __name__ == "__main__":
     for vfile in chart_values_files:
         parsed_values.append(read_yaml(vfile, default={}))
 
-    # Auto-discover services when the caller didn't pass an explicit dict.
-    # Two layers, in this order:
-    #   1. DSL: suse-library.services[] — each entry has {binding, type}
-    #      and is mapped to (binding -> type). The DSL is the future.
-    #   2. Legacy: suse-library.<chart>.enabled: true — each enabled
-    #      catalogued chart is mapped to (chart -> chart) for back-compat
-    #      with bundles <= v0.9 that didn't have services[].
+    # Auto-discover services from `suse-library.services[]` (the unified
+    # DSL in bundle v0.10+). Each entry has {binding, type, provisioning}
+    # and maps to (binding -> type) for the port-forward registration
+    # below.
+    #
     # An explicit `services={...}` argument disables auto-discovery so a
     # caller can register services the chart doesn't deploy itself, or
     # narrow the surface to a subset.
+    #
+    # We dropped the pre-DSL legacy path (`suse-library.<chart>.enabled`
+    # without `services[]`) when the bundle moved to DSL-only at v0.10.
+    # If you're on a bundle <= v0.9, pin the extension to its 0.1.x line
+    # or pass `services={...}` explicitly.
     if services == None:
         services = {}
-        # Catalogued chart names from CATALOG.md — we only auto-register
-        # legacy entries whose chart name is in this set, so a typo or a
-        # custom chart in values.yaml doesn't silently turn into a
-        # phantom port-forward.
-        legacy_charts = ['postgresql', 'redis', 'grafana', 'prometheus',
-                         'mariadb', 'mongodb', 'kafka', 'rabbitmq', 'nats']
         for cfg in parsed_values:
             lib = (cfg.get('suse-library', {}) or {}) if cfg else {}
-            # 1. DSL path
             for entry in (lib.get('services') or []):
                 binding = entry.get('binding')
                 stype = entry.get('type')
                 provisioning = entry.get('provisioning', 'local')
-                # Skip external — no in-cluster Service to forward.
-                if provisioning == 'external':
+                # Only `local` provisioning deploys an in-cluster
+                # workload — `shared` and `external` produce only the
+                # binding secret. Skip both so we don't register a
+                # phantom k8s_resource Tilt can't resolve.
+                if provisioning != 'local':
+                    continue
+                # `local` provisioning still requires the sub-chart to
+                # be enabled. The helper's binding-secret renders even
+                # when <chart>.enabled is false, but no workload is
+                # produced — same phantom-port-forward problem.
+                if not (lib.get(stype, {}) or {}).get('enabled'):
                     continue
                 if binding and stype:
                     services[binding] = stype
-            # 2. Legacy path (only when DSL is empty for this file —
-            # mirrors the helper's binding-secret.yaml XOR branch)
-            if not (lib.get('services') or []):
-                for chart in legacy_charts:
-                    block = lib.get(chart, {}) or {}
-                    if block.get('enabled'):
-                        services.setdefault(chart, chart)
 
     def _ingress_links(block):
         ing = block.get('ingress', {}) if block else {}
@@ -519,17 +517,23 @@ if __name__ == "__main__":
         links=app_links,
     )
 
-    # Surface each declared service on its conventional port. Workload name
-    # follows what the AppCo sub-chart actually deploys: <release>-<alias>,
-    # where alias = the binding name the library chart declared (e.g.
-    # 'database'). With Helm alias resolution working correctly, the chart
-    # renders all its resources prefixed with the alias rather than its own
-    # chart name. So services={'database': 'postgresql'} in suse_app() maps
-    # to a workload named <release>-database (NOT <release>-postgresql).
-    # The service_type is kept as a logical identifier — the binding name
-    # is what the K8s API uses.
+    # Surface each declared service on its conventional port. Workload
+    # name follows the SUSE library chart's convention as declared in
+    # idefxH/rda-opinion-bundle-example/library-chart/Chart.yaml:
+    #     "every dep is the AppCo chart name verbatim. No alias.
+    #      Resources deploy as <release>-<chart-name>."
+    # So workload = <release>-<service_type>, regardless of binding.
+    # The binding name remains the env-var prefix and the binding
+    # secret suffix (POSTGRESQL_HOST, <release>-<binding>-binding);
+    # the K8s workload name comes from the chart name.
+    seen_workloads = {}
     for binding_name, service_type in services.items():
-        workload = name + '-' + binding_name
+        workload = name + '-' + service_type
+        # Two bindings of the same type collapse to one workload —
+        # register it once.
+        if workload in seen_workloads:
+            continue
+        seen_workloads[workload] = True
 
         # Sub-chart ingress lookup. Grafana uses <chart>.ingress (flat).
         # Prometheus is special: the upstream chart puts the server
