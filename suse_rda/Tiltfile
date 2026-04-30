@@ -468,35 +468,45 @@ if __name__ == "__main__":
     if chart_values_files == None:
         chart_values_files = [chart_path + '/values.yaml']
 
-    # ─── Namespace resolution (NS Phase A) ─────────────────────────────
-    # Read `.rda/project.yaml` for the namespace template, expand the
-    # {{.project}} / {{.user}} tokens, pre-create the namespace, and pass
-    # --namespace to helm. Default `{{.project}}` for projects scaffolded
-    # before rda-cli v0.1.43 (no namespace block in project.yaml) — same
-    # default as `rda new` itself, so behaviour matches a fresh scaffold
-    # without forcing legacy projects through `rda upgrade` first.
+    # ─── Namespace resolution (NS Phase A + 0.1.47 single-source-of-truth) ──
+    # Shell out to `rda namespace expand` which reads `.rda/project.yaml`
+    # under namespace.local, substitutes {{.project}} / {{.user}}, and
+    # prints the resolved namespace on stdout. Single source of truth from
+    # rda-cli 0.1.47+: the previous Starlark expansion that lived inline
+    # here is gone, replaced by this one shell-out. Drift between the
+    # CLI's expander and ours is no longer possible because there's only
+    # one expander now.
     #
-    # The CLI persists only the literal template string; expansion happens
-    # here so a `git clone` on a different developer's box produces a
-    # different namespace without rewriting project.yaml. Spec source of
-    # truth: rda-cli/rda.md BEHAVIOR/new (namespace_template input) and
-    # rda-docs/concepts/namespaces.md.
-    project_meta = read_yaml('.rda/project.yaml', default={})
-    ns_template = ((project_meta.get('namespace', {}) or {}).get('local', '') or '{{.project}}')
-    # $USER is set by every interactive shell on macOS / Linux / WSL.
-    # Fall back to 'default' if somehow unset (e.g. CI without USER) so
-    # the template still resolves rather than failing at helm time.
-    user_value = str(local('echo "${USER:-default}"', quiet=True, echo_off=True)).strip() or 'default'
-    namespace = ns_template
-    for token, value in [('{{.project}}', name), ('{{ .project }}', name),
-                         ('{{.user}}', user_value), ('{{ .user }}', user_value)]:
-        namespace = namespace.replace(token, value)
-    if '{{' in namespace or '}}' in namespace:
-        fail((
-            'suse_app: namespace template %r contains an unrecognised token ' +
-            'after expansion (got %r). Allowed tokens: {{.project}}, {{.user}}. ' +
-            'Edit .rda/project.yaml namespace.local to fix.'
-        ) % (ns_template, namespace))
+    # Fallback path: when `rda` isn't on PATH (older bundle / fresh
+    # checkout before `go install`), or when the project predates
+    # rda-cli's 0.1.47, we fall back to a tiny Starlark expander that
+    # handles the common case ({{.project}} default, {{.user}} from
+    # $USER). Same shape as before; just no longer the canonical one.
+    rda_can_expand = str(local(
+        'command -v rda > /dev/null 2>&1 && rda namespace --help > /dev/null 2>&1 && echo yes || echo no',
+        quiet=True, echo_off=True)).strip()
+    if rda_can_expand == 'yes':
+        namespace = str(local('rda namespace expand', quiet=True, echo_off=True)).strip()
+        if not namespace:
+            fail('suse_app: `rda namespace expand` returned empty output. Check `.rda/project.yaml`.')
+    else:
+        # Legacy fallback: in-Tiltfile expander (kept simple — covers UC1
+        # and UC2 patterns; for richer cases the user should upgrade to
+        # rda-cli 0.1.47+ which owns the canonical logic).
+        project_meta = read_yaml('.rda/project.yaml', default={})
+        ns_template = ((project_meta.get('namespace', {}) or {}).get('local', '') or '{{.project}}')
+        user_value = str(local('echo "${USER:-default}"', quiet=True, echo_off=True)).strip() or 'default'
+        namespace = ns_template
+        for token, value in [('{{.project}}', name), ('{{ .project }}', name),
+                             ('{{.user}}', user_value), ('{{ .user }}', user_value)]:
+            namespace = namespace.replace(token, value)
+        if '{{' in namespace or '}}' in namespace:
+            fail((
+                'suse_app: namespace template %r contains an unrecognised token ' +
+                'after expansion (got %r). Allowed tokens: {{.project}}, {{.user}}. ' +
+                'Edit .rda/project.yaml namespace.local to fix, or install rda 0.1.47+ ' +
+                'so this extension can shell out to `rda namespace expand` instead.'
+            ) % (ns_template, namespace))
 
     # Pre-create the namespace idempotently. Tilt invokes `helm template`
     # (not `helm install --create-namespace`) so the namespace must exist
