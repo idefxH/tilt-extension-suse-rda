@@ -577,40 +577,65 @@ if __name__ == "__main__":
     # or pass `services={...}` explicitly.
     if services == None:
         services = {}
+        # Merged view across parsed_values:
+        #   - services[] entries come from chart/values.yaml (the user's
+        #     DSL) — overlay never has services[].
+        #   - chart-level <chart>.enabled comes from the overlay (written
+        #     by `rda render` for every enabled local service) OR from
+        #     chart/values.yaml on pre-0.1.38 projects that wrote it
+        #     manually. Either source counts.
+        #
+        # Earlier impl looped per-cfg and looked up <chart>.enabled in
+        # the SAME cfg as the services[] entry. That broke for the
+        # canonical post-0.1.38 split: services[] is in values.yaml,
+        # <chart>.enabled is in the overlay, so the check failed for
+        # every service and Tilt never registered the workloads. Result:
+        # auto-Ingress link never showed up in the UI for grafana /
+        # prometheus / etc. Discovered live Apr 30 (issue #14, kind of).
+        #
+        # The fix: collect services[] and chart-level enabled separately
+        # across ALL cfgs, then intersect. Last-wins on binding-name
+        # de-dup matches Helm's --values stacking semantics.
+        all_lib_blocks = []
+        all_services_by_binding = {}
         for cfg in parsed_values:
             lib = (cfg.get('suse-library', {}) or {}) if cfg else {}
+            all_lib_blocks.append(lib)
             for entry in (lib.get('services') or []):
-                binding = entry.get('binding')
-                stype = entry.get('type')
-                provisioning = entry.get('provisioning', 'local')
-                # Only `local` provisioning deploys an in-cluster
-                # workload — `shared` and `external` produce only the
-                # binding secret. Skip both so we don't register a
-                # phantom k8s_resource Tilt can't resolve.
-                if provisioning != 'local':
-                    continue
-                # services[].enabled drives deployment (rda-cli v0.1.38+,
-                # bundle v0.11.6+). Default true if absent (back-compat
-                # with pre-0.1.38 scaffolds; fresh scaffolds opt-in
-                # explicitly). When false, the entry is inert: no
-                # binding-secret rendered, no chart-level enable flipped
-                # by rda render, no sub-chart deployed. Skipping the
-                # workload registration here prevents Tilt from looking
-                # for a Service that helm never produced.
-                svc_enabled = entry.get('enabled', True)
-                if svc_enabled == False:
-                    continue
-                # Sanity belt-and-braces: when neither the rda-render-
-                # generated overlay nor the user's values.yaml has
-                # <chart>.enabled=true, the sub-chart isn't deployed and
-                # we'd register a phantom k8s_resource. Same skip applies.
-                # (Pre-0.1.38 path: user wrote `<chart>.enabled` manually.
-                #  Post-0.1.38 path: rda render derived it. Both flow
-                #  through the merged parsed_values blocks read here.)
-                if not (lib.get(stype, {}) or {}).get('enabled'):
-                    continue
-                if binding and stype:
-                    services[binding] = stype
+                if entry.get('binding'):
+                    all_services_by_binding[entry['binding']] = entry
+
+        def _chart_enabled(stype):
+            for lib in all_lib_blocks:
+                if (lib.get(stype, {}) or {}).get('enabled'):
+                    return True
+            return False
+
+        for binding in all_services_by_binding:
+            entry = all_services_by_binding[binding]
+            stype = entry.get('type')
+            provisioning = entry.get('provisioning', 'local')
+            # Only `local` provisioning deploys an in-cluster workload —
+            # `shared` and `external` produce only the binding secret.
+            # Skip both so we don't register a phantom k8s_resource Tilt
+            # can't resolve.
+            if provisioning != 'local':
+                continue
+            # services[].enabled drives deployment (rda-cli v0.1.38+,
+            # bundle v0.11.6+). Default true if absent (back-compat with
+            # pre-0.1.38 scaffolds; fresh scaffolds opt-in explicitly).
+            # When false, the entry is inert: no binding-secret rendered,
+            # no chart-level enable flipped by rda render, no sub-chart
+            # deployed.
+            if entry.get('enabled', True) == False:
+                continue
+            # Belt-and-braces: at least one cfg must have <chart>.enabled
+            # true, otherwise the sub-chart isn't deployed and we'd
+            # register a phantom k8s_resource.
+            if not _chart_enabled(stype):
+                continue
+            if stype:
+                services[binding] = stype
 
     def _ingress_links(block):
         ing = block.get('ingress', {}) if block else {}
