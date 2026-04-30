@@ -567,18 +567,43 @@ if __name__ == "__main__":
         links=app_links,
     )
 
-    # Surface each declared service on its conventional port. Workload
-    # name follows the SUSE library chart's convention as declared in
-    # idefxH/rda-opinion-bundle-example/library-chart/Chart.yaml:
-    #     "every dep is the AppCo chart name verbatim. No alias.
-    #      Resources deploy as <release>-<chart-name>."
-    # So workload = <release>-<service_type>, regardless of binding.
-    # The binding name remains the env-var prefix and the binding
-    # secret suffix (POSTGRESQL_HOST, <release>-<binding>-binding);
-    # the K8s workload name comes from the chart name.
+    # Surface each declared service on its conventional port. The
+    # workload name is NOT always <release>-<chart-name> — some AppCo
+    # charts add a master/replica suffix (redis → <release>-redis-master,
+    # prometheus → <release>-prometheus-server, mariadb-galera variants
+    # → <release>-mariadb-primary, etc.). The authoritative source of the
+    # actual K8s resource name is the `service.host` template in the
+    # bundle's library-chart/dsl-mappings.yaml — the same template the
+    # library helper uses to build the binding-secret's `host` key.
+    # We read that file (vendored at chart_path/charts/suse-library/
+    # dsl-mappings.yaml after `helm dep update`), pick the chart-type's
+    # entry, render the host template by substituting .Release.Name.
+    # Fallback when the file is absent (older bundle) or the type isn't
+    # catalogued: the legacy <release>-<service_type> assumption.
+    mappings_path = chart_path + '/charts/suse-library/dsl-mappings.yaml'
+    mappings_doc = read_yaml(mappings_path, default={'charts': {}})
+    catalogued_charts = mappings_doc.get('charts', {})
+
+    def workload_name_for(release, service_type):
+        """Compute the rendered K8s workload name for a service type."""
+        chart_entry = catalogued_charts.get(service_type, {})
+        versions = chart_entry.get('versions', [])
+        if not versions:
+            return release + '-' + service_type
+        # versions[0] is fine for now — Phase 2 can match against the
+        # actually-vendored chart version via semverCompare.
+        host_tpl = versions[0].get('service', {}).get('host', '')
+        if not host_tpl:
+            return release + '-' + service_type
+        # Render the (very limited) Go template subset used in
+        # dsl-mappings.yaml: just substitute {{ .Release.Name }} (with or
+        # without spaces). Anything richer would need a real Go template
+        # engine, which Starlark doesn't have.
+        return host_tpl.replace('{{ .Release.Name }}', release).replace('{{.Release.Name}}', release)
+
     seen_workloads = {}
     for binding_name, service_type in services.items():
-        workload = name + '-' + service_type
+        workload = workload_name_for(name, service_type)
         # Two bindings of the same type collapse to one workload —
         # register it once.
         if workload in seen_workloads:
