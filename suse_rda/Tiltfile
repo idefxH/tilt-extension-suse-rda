@@ -470,19 +470,36 @@ if __name__ == "__main__":
         # via cwd, and the project's chart_dir is computed relative to
         # the .rda/project.yaml location.
         local('rda render', quiet=True, echo_off=False)
-        generated_overlay = chart_path + '/values.generated.yaml'
+        # Look for the overlay at the new path first (rda-cli v0.1.38+:
+        # chart/.rda/values.generated.yaml), then fall back to the old
+        # path (chart/values.generated.yaml) for projects that were
+        # rendered with an older CLI. Both are valid; whichever exists
+        # is what `helm` should consume. The fallback gets the dev a
+        # working tilt up while they upgrade.
+        new_overlay = chart_path + '/.rda/values.generated.yaml'
+        old_overlay = chart_path + '/values.generated.yaml'
+        if os.path.exists(new_overlay):
+            generated_overlay = new_overlay
+        elif os.path.exists(old_overlay):
+            generated_overlay = old_overlay
+            print('suse_rda: note — using legacy ' + old_overlay +
+                  '. rda-cli v0.1.38+ writes to chart/.rda/values.generated.yaml; ' +
+                  'next `rda render` will migrate. You can delete the legacy ' +
+                  'file once chart/.rda/values.generated.yaml exists.')
+        else:
+            generated_overlay = ''
         # Only append when render actually produced the file (it does
         # unconditionally — see render.go's writeAtomic — but stay
         # defensive in case the user is on an older rda binary that
         # predates BEHAVIOR: render).
-        if os.path.exists(generated_overlay):
-            # De-dup: if the user already passed values.generated.yaml in
-            # chart_values_files, don't add it twice (Helm tolerates dup
-            # files but the warning would confuse).
+        if generated_overlay != '':
+            # De-dup: if the user already passed the overlay in
+            # chart_values_files, don't add it twice (Helm tolerates
+            # dup files but the warning would confuse).
             if generated_overlay not in chart_values_files:
                 chart_values_files = chart_values_files + [generated_overlay]
     else:
-        print('suse_rda: warning — `rda` not on PATH; chart/values.generated.yaml ' +
+        print('suse_rda: warning — `rda` not on PATH; chart/.rda/values.generated.yaml ' +
               'will not be regenerated. Install rda CLI to keep services[] DSL ' +
               'in sync with sub-chart values. See idefxH/rda-cli.')
 
@@ -534,10 +551,24 @@ if __name__ == "__main__":
                 # phantom k8s_resource Tilt can't resolve.
                 if provisioning != 'local':
                     continue
-                # `local` provisioning still requires the sub-chart to
-                # be enabled. The helper's binding-secret renders even
-                # when <chart>.enabled is false, but no workload is
-                # produced — same phantom-port-forward problem.
+                # services[].enabled drives deployment (rda-cli v0.1.38+,
+                # bundle v0.11.6+). Default true if absent (back-compat
+                # with pre-0.1.38 scaffolds; fresh scaffolds opt-in
+                # explicitly). When false, the entry is inert: no
+                # binding-secret rendered, no chart-level enable flipped
+                # by rda render, no sub-chart deployed. Skipping the
+                # workload registration here prevents Tilt from looking
+                # for a Service that helm never produced.
+                svc_enabled = entry.get('enabled', True)
+                if svc_enabled == False:
+                    continue
+                # Sanity belt-and-braces: when neither the rda-render-
+                # generated overlay nor the user's values.yaml has
+                # <chart>.enabled=true, the sub-chart isn't deployed and
+                # we'd register a phantom k8s_resource. Same skip applies.
+                # (Pre-0.1.38 path: user wrote `<chart>.enabled` manually.
+                #  Post-0.1.38 path: rda render derived it. Both flow
+                #  through the merged parsed_values blocks read here.)
                 if not (lib.get(stype, {}) or {}).get('enabled'):
                     continue
                 if binding and stype:
