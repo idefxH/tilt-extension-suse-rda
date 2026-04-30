@@ -720,7 +720,21 @@ if __name__ == "__main__":
     catalogued_charts = mappings_doc.get('charts', {})
 
     def workload_name_for(release, service_type):
-        """Compute the rendered K8s workload name for a service type."""
+        """Compute the rendered K8s workload name for a service type.
+
+        From bundle library 0.11.12+ (NS Phase C), service.host is an
+        FQDN: `<release>-<chart>.<namespace>.svc.cluster.local`. The
+        FQDN is what binding-secrets put in the BINDING_HOST env var
+        (so apps can reach the service even when bindings live in a
+        different namespace from the consumer). For Tilt's k8s_resource
+        registration we need just the bare workload name (the part
+        before the first dot) — k8s_resource matches by Deployment /
+        StatefulSet name, not by Service FQDN.
+
+        Pre-0.11.12 templates were bare names without the FQDN suffix;
+        the strip below is a no-op on them, so this function works
+        across both shapes.
+        """
         chart_entry = catalogued_charts.get(service_type, {})
         versions = chart_entry.get('versions', [])
         if not versions:
@@ -731,10 +745,19 @@ if __name__ == "__main__":
         if not host_tpl:
             return release + '-' + service_type
         # Render the (very limited) Go template subset used in
-        # dsl-mappings.yaml: just substitute {{ .Release.Name }} (with or
-        # without spaces). Anything richer would need a real Go template
-        # engine, which Starlark doesn't have.
-        return host_tpl.replace('{{ .Release.Name }}', release).replace('{{.Release.Name}}', release)
+        # dsl-mappings.yaml. Substitute {{ .Release.Name }} (with or
+        # without spaces) and {{ .Release.Namespace }}. Anything richer
+        # would need a real Go template engine, which Starlark doesn't
+        # have.
+        rendered = host_tpl
+        rendered = rendered.replace('{{ .Release.Name }}', release).replace('{{.Release.Name}}', release)
+        rendered = rendered.replace('{{ .Release.Namespace }}', namespace).replace('{{.Release.Namespace}}', namespace)
+        # Strip the FQDN suffix to get the bare workload name. Splits
+        # on the first dot — `<workload>.<ns>.svc.cluster.local` →
+        # `<workload>`. Idempotent on legacy bare-name templates.
+        if '.' in rendered:
+            rendered = rendered.split('.', 1)[0]
+        return rendered
 
     seen_workloads = {}
     for binding_name, service_type in services.items():
