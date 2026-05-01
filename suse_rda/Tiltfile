@@ -617,7 +617,13 @@ def main(library_dir, *values_files):
         # `helm dep update`, which becomes a no-op.
         kept = []
     else:
-        kept = [d for d in full_deps if d.get("name") in enabled]
+        # Compare against the user-facing chart key, which is the helm
+        # `alias` when present (so `dex-idp` aliased as `dex` matches
+        # services[].type=dex), or the bare `name` otherwise. Without
+        # this, aliased deps get stripped silently and the user sees
+        # `unknown resource <release>-<binding>` when the tilt-ext
+        # tries to wire a k8s_resource that helm never rendered.
+        kept = [d for d in full_deps if d.get("alias", d.get("name")) in enabled]
 
     out = dict(full)  # shallow copy
     out["dependencies"] = kept
