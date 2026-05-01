@@ -247,6 +247,35 @@ def suse_app(
     pack_args.extend(['--path', '.'])
     pack_cmd = ' '.join(pack_args)
 
+    # Pre-build hook: auto-`go mod tidy` for Go projects with a go.mod
+    # but no go.sum (or whose go.sum is older than go.mod, indicating
+    # the dev added a require but never re-tidied). The heroku/go
+    # buildpack runs `go install` in module-aware strict mode, which
+    # fails with `missing go.sum entry for module providing package
+    # <pkg>` when go.sum is absent. Auto-tidying bridges:
+    #   - Existing projects scaffolded before bundle 0.11.23 ships
+    #     go.sum (the template addition that triggered this hook).
+    #   - Devs who hand-edit go.mod and forget to re-tidy.
+    # Skip silently when:
+    #   - language != 'go'
+    #   - no go.mod at the project root
+    #   - go is not on PATH (dev hasn't installed Go locally — pack
+    #     downloads its own Go inside the buildpack image, but tidy
+    #     needs a host-side go binary)
+    if language == 'go' and os.path.exists('go.mod'):
+        local(
+            "set -e; "
+            "if ! command -v go >/dev/null 2>&1; then "
+            "echo '[suse_rda] go not on PATH — skipping go mod tidy preflight "
+            "(if pack build fails on missing go.sum, install Go locally OR "
+            "ship go.sum in your project)' >&2; exit 0; fi; "
+            "if [ ! -f go.sum ] || [ go.mod -nt go.sum ]; then "
+            "echo '[suse_rda] running go mod tidy (go.sum missing or stale)'; "
+            "go mod tidy; "
+            "fi",
+            quiet=False, echo_off=True,
+        )
+
     # Live update steps. Only interpreted languages (nodejs, python) opt
     # into live_update; compiled languages rebuild via pack on each change.
     # The cycle is:
