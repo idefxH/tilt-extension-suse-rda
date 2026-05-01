@@ -521,11 +521,11 @@ def _yaml():
         # in the python3 the host's Tilt actually invokes (which on
         # macOS may differ from the conda one in the dev's shell).
         sys.stderr.write(
-            "[filter_enabled_deps] PyYAML not installed in this python3 " +
-            "({0}); install with: python3 -m pip install --break-system-packages pyyaml\n" +
-            "(check `which python3` from the same env Tilt runs in — on macOS " +
-            "the host's /usr/bin/python3 is often distinct from your shell's.)\n"
-            .format(sys.executable)
+            ("[filter_enabled_deps] PyYAML not installed in this python3 " +
+             "({0}); install with: python3 -m pip install --break-system-packages pyyaml\n" +
+             "(check `which python3` from the same env Tilt runs in — on macOS " +
+             "the host's /usr/bin/python3 is often distinct from your shell's.)\n"
+            ).format(sys.executable)
         )
         sys.exit(2)
 
@@ -649,8 +649,8 @@ def main(library_dir, *values_files):
     skipped = len(full_deps) - len(kept)
     suffix = "" if wrote else " (unchanged on disk)"
     print(
-        "[suse_rda] filter_enabled_deps: kept {0}/{1} sub-chart(s) " +
-        "[{2}]; skipped {3} disabled{4}".format(
+        ("[suse_rda] filter_enabled_deps: kept {0}/{1} sub-chart(s) " +
+         "[{2}]; skipped {3} disabled{4}").format(
             len(kept), len(full_deps),
             ", ".join(sorted([d.get("name", "?") for d in kept])) or "none",
             skipped, suffix,
@@ -706,9 +706,9 @@ def _yaml():
         return yaml
     except ImportError:
         sys.stderr.write(
-            "[bootstrap_helm_repos] PyYAML not installed in this python3 " +
-            "({0}); install with: python3 -m pip install --break-system-packages pyyaml\n"
-            .format(sys.executable)
+            ("[bootstrap_helm_repos] PyYAML not installed in this python3 " +
+             "({0}); install with: python3 -m pip install --break-system-packages pyyaml\n"
+            ).format(sys.executable)
         )
         sys.exit(2)
 
