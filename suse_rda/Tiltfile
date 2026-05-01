@@ -270,14 +270,13 @@ def suse_app(
     #     needs a host-side go binary)
     if language == 'go' and os.path.exists('go.mod'):
         local(
-            "set -e; "
-            "if ! command -v go >/dev/null 2>&1; then "
-            "echo '[suse_rda] go not on PATH — skipping go mod tidy preflight "
-            "(if pack build fails on missing go.sum, install Go locally OR "
-            "ship go.sum in your project)' >&2; exit 0; fi; "
-            "if [ ! -f go.sum ] || [ go.mod -nt go.sum ]; then "
-            "echo '[suse_rda] running go mod tidy (go.sum missing or stale)'; "
-            "go mod tidy; "
+            "set -e; " +
+            "if ! command -v go >/dev/null 2>&1; then " +
+            "echo '[suse_rda] go not on PATH; skipping go mod tidy preflight' >&2; " +
+            "exit 0; fi; " +
+            "if [ ! -f go.sum ] || [ go.mod -nt go.sum ]; then " +
+            "echo '[suse_rda] running go mod tidy (go.sum missing or stale)'; " +
+            "go mod tidy; " +
             "fi",
             quiet=False, echo_off=True,
         )
