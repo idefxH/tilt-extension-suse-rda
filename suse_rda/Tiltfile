@@ -907,6 +907,60 @@ if __name__ == "__main__":
         ' --dry-run=client -o yaml | kubectl apply -f -',
         quiet=True, echo_off=True)
 
+    # Mirror the application-collection imagePullSecret from `default` to
+    # the deploy namespace if it's missing. Background:
+    #   - The Application Collection Rancher Desktop extension installs
+    #     the Secret in `default` only. With NS Phase A (rda 0.1.43+),
+    #     every project deploys to its own namespace (`{{.project}}` or
+    #     a multi-dev `{{.project}}-{{.user}}` template), so the Secret
+    #     is never automatically present where it's needed.
+    #   - The pod's spec carries `imagePullSecrets: [application-collection]`
+    #     unconditionally. Without the Secret in NS, kubelet logs
+    #     `Unable to retrieve some image pull secrets`. App image pulls
+    #     from dp.apps.rancher.io (BCI base, AppCo subchart images) all
+    #     fail with ImagePullBackOff — locally Tilt can mask this by
+    #     building images itself, but any real subchart pull cracks open.
+    #
+    # Strategy:
+    #   1. If the target NS already has the Secret → skip silently.
+    #   2. Else if `default` has it → kubectl get -o yaml | sed | apply.
+    #      Strips namespace + cluster-bound metadata so apply lands in
+    #      the new ns. Idempotent (apply, not create).
+    #   3. Else loud failure with the remediation hint pointing at
+    #      `helm registry login` + the AppCo extension docs.
+    #
+    # Skipped via SUSE_RDA_SKIP_PULLSECRET_MIRROR=1 for the air-gapped
+    # / kubernetes-reflector / ESO setups where the operator handles
+    # distribution another way.
+    if os.getenv('SUSE_RDA_SKIP_PULLSECRET_MIRROR', '') != '1':
+        local(
+            "set -e; "
+            "if kubectl get secret -n " + namespace + " application-collection "
+            ">/dev/null 2>&1; then exit 0; fi; "
+            "if ! kubectl get secret -n default application-collection "
+            ">/dev/null 2>&1; then "
+            "echo '[suse_rda] FATAL: Secret/application-collection not found "
+            "in `default` (the AppCo Rancher Desktop extension would normally "
+            "install it there). Either install/launch the AppCo extension, "
+            "OR run `helm registry login dp.apps.rancher.io` then bootstrap "
+            "the Secret manually via kubectl create secret docker-registry; "
+            "OR set SUSE_RDA_SKIP_PULLSECRET_MIRROR=1 if your cluster uses "
+            "kubernetes-reflector / External Secrets to distribute it.' >&2; "
+            "exit 1; fi; "
+            # sed strips instance-bound metadata (namespace + uid +
+            # resourceVersion + creationTimestamp) so the doc is
+            # namespace-portable. kubectl apply -n <target> then anchors
+            # it to the deploy NS. No jq dep — macOS doesn't ship one.
+            "kubectl get secret -n default application-collection -o yaml | "
+            "sed -e '/^  namespace:/d' "
+            "-e '/^  uid:/d' "
+            "-e '/^  resourceVersion:/d' "
+            "-e '/^  creationTimestamp:/d' | "
+            "kubectl apply -n " + namespace + " -f - >/dev/null && "
+            "echo '[suse_rda] mirrored Secret/application-collection "
+            "default -> " + namespace + "'",
+            quiet=False, echo_off=True)
+
     # ─── DSL projection (rda render) ────────────────────────────────────
     # Helm resolves sub-chart values BEFORE templates run, so the library
     # chart's _helpers.tpl can't inject services[].auth.user.name into
