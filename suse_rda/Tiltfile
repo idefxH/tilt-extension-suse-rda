@@ -86,10 +86,29 @@ LANGUAGE_DEFAULTS = {
         'live_update_install_cmd': None,
     },
     'go': {
+        # heroku/go ONLY. Do NOT add heroku/procfile.
+        #
+        # When a Procfile is present, heroku/procfile takes over launch
+        # process registration and emits Procfile entries verbatim:
+        # `web: bin/app` runs literally as `bin/app`, but the launcher's
+        # PATH is `/cnb/process:/cnb/lifecycle:/usr/local/sbin:...` —
+        # it does NOT include the heroku_go layer's bin dir
+        # (/layers/heroku_go/go_target/bin) where the actual binary
+        # lives. The pod CrashLoops with "bin/app: No such file".
+        #
+        # Without heroku/procfile, heroku/go auto-registers the default
+        # process pointing at the absolute path of the compiled binary.
+        # The Procfile in the project template is then ignored at
+        # launch time (it's still useful for local `pack run --process
+        # dev` invocations, but Tilt's pack_default_process='web'
+        # picks up heroku/go's auto-registration).
         'buildpacks': ['heroku/go'],
         'live_update_paths': [],
         'live_update_install_trigger': [],
         'live_update_install_cmd': None,
+        # Tilt builds use heroku/go's auto-registered `web` process —
+        # the compiled binary at /layers/heroku_go/go_target/bin/<name>.
+        'pack_default_process': 'web',
     },
 }
 
@@ -398,6 +417,176 @@ if __name__ == "__main__":
 '''
     local('cat > ' + align_script_path + " <<'__SUSE_RDA_PY_EOF__'\n" + align_script_src + "\n__SUSE_RDA_PY_EOF__", echo_off=True, quiet=True)
 
+    # Filter the library chart's deps down to ONLY the sub-charts the
+    # project has enabled. Without this, every `helm dep update` pulls
+    # all 7+ AppCo charts (postgresql, redis, prometheus, grafana, dex,
+    # mariadb, apache-kafka, ...) on every fresh project — even when
+    # the dev only enabled mariadb. Triggers AppCo rate-limits in
+    # high-iteration workflows (e2e harness, repeated `rda new`).
+    #
+    # The filter reads the project's values + the rda-render overlay,
+    # builds the set of `<chart>.enabled: true` chart names, and
+    # rewrites the library chart's Chart.yaml keeping only those deps.
+    # Backed up to Chart.yaml.full on first run so subsequent
+    # enable/disable cycles can re-derive from the full list.
+    #
+    # Idempotent: if Chart.yaml.full exists, restore from it before
+    # filtering. Safe across rda render re-runs (Tilt fires it on
+    # every save in the chart tree).
+    filter_script_path = '/tmp/_suse_rda_filter_enabled_deps.py'
+    filter_script_src = r'''#!/usr/bin/env python3
+"""
+Strip the library Chart.yaml deps down to only the sub-charts the
+project has enabled in its values. Cuts `helm dep update` work to
+the minimum (one OCI pull per actually-used sub-chart) and dodges
+AppCo rate-limits.
+
+Usage: filter_enabled_deps.py <library-chart-dir> <values-file>...
+
+Reads each values file, walks `suse-library.<chart>.enabled` AND
+top-level `<chart>.enabled` (rda render's overlay shape), unions
+the truthy chart names, then rewrites <library>/Chart.yaml keeping
+only deps whose `name` matches.
+
+Source-of-truth: <library>/Chart.yaml.full. Created on first run
+from the live Chart.yaml. Filtering reads from .full every run so
+re-enabling a previously-disabled chart still works.
+
+Idempotent. Outputs one line per kept dep + the full count.
+"""
+import os
+import shutil
+import sys
+
+
+def _yaml():
+    try:
+        import yaml
+        return yaml
+    except ImportError:
+        sys.stderr.write(
+            "[filter_enabled_deps] PyYAML not installed; "
+            "pip3 install pyyaml or run with python3 -m pip install pyyaml\n"
+        )
+        sys.exit(0)
+
+
+def enabled_charts(values_files):
+    """Union the chart names with .enabled=true across all values files.
+
+    Three shapes supported:
+      1. Static `<chart>.enabled: true` under `suse-library` (legacy).
+      2. rda render overlay's `suse-library.<chart>.enabled: true`.
+      3. DSL `services[]` entries — `services[i].type` + `enabled: true`
+         (the modern path, what `rda add-service` writes). Critical:
+         this filter runs BEFORE `rda render` regenerates the overlay,
+         so we can't rely on shape #2 alone — services[] is the only
+         source of truth at filter-time on a fresh project.
+
+    Top-level `<chart>.enabled` is also checked as a fallback for the
+    rare project that pre-dates the DSL.
+    """
+    yaml = _yaml()
+    enabled = set()
+    SKIP_TOP = {"suse-library", "global", "image", "ingress",
+                "imagePullSecrets", "resources", "probes", "metrics",
+                "podAnnotations", "service", "name", "replicas",
+                "port", "apiVersion", "kind"}
+    for path in values_files:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        # Shape 1+2: under suse-library.<chart>.enabled
+        sl = data.get("suse-library")
+        if isinstance(sl, dict):
+            for name, sub in sl.items():
+                if isinstance(sub, dict) and sub.get("enabled") is True:
+                    enabled.add(name)
+            # Shape 3: services[] DSL — services[i].type + enabled. The
+            # CLI defaults services[].enabled to false in the scaffold,
+            # so we only count entries the dev has explicitly flipped to
+            # true. Same iteration the library helpers and `rda render`
+            # walk; staying consistent here matters.
+            services = sl.get("services") or []
+            if isinstance(services, list):
+                for entry in services:
+                    if not isinstance(entry, dict):
+                        continue
+                    # Default-when-missing: true (back-compat with pre-
+                    # 0.1.38 scaffolds that didn't write the field).
+                    if entry.get("enabled", True) is False:
+                        continue
+                    chart_type = entry.get("type")
+                    if chart_type:
+                        enabled.add(chart_type)
+        # Top-level fallback (legacy / non-DSL projects).
+        for name, sub in data.items():
+            if name in SKIP_TOP:
+                continue
+            if isinstance(sub, dict) and sub.get("enabled") is True:
+                enabled.add(name)
+    return enabled
+
+
+def main(library_dir, *values_files):
+    chart_yaml = os.path.join(library_dir, "Chart.yaml")
+    full_backup = chart_yaml + ".full"
+    if not os.path.isfile(chart_yaml):
+        return
+
+    # First run: snapshot the live Chart.yaml as the source-of-truth.
+    if not os.path.isfile(full_backup):
+        shutil.copy2(chart_yaml, full_backup)
+
+    yaml = _yaml()
+    with open(full_backup) as f:
+        full = yaml.safe_load(f) or {}
+
+    full_deps = full.get("dependencies") or []
+    if not full_deps:
+        return  # nothing to filter
+
+    enabled = enabled_charts(values_files)
+    if not enabled:
+        # No services enabled. Strip ALL deps — fastest possible
+        # `helm dep update`, which becomes a no-op.
+        kept = []
+    else:
+        kept = [d for d in full_deps if d.get("name") in enabled]
+
+    out = dict(full)  # shallow copy
+    out["dependencies"] = kept
+
+    with open(chart_yaml, "w") as f:
+        yaml.safe_dump(out, f, default_flow_style=False, sort_keys=False)
+
+    skipped = len(full_deps) - len(kept)
+    print(
+        "[suse_rda] filter_enabled_deps: kept {0}/{1} sub-chart(s) "
+        "[{2}]; skipped {3} disabled".format(
+            len(kept), len(full_deps),
+            ", ".join(sorted([d.get("name", "?") for d in kept])) or "none",
+            skipped,
+        ),
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("usage: filter_enabled_deps.py <library-chart-dir> <values-file>...",
+              file=sys.stderr)
+        sys.exit(2)
+    main(*sys.argv[1:])
+'''
+    local('cat > ' + filter_script_path + " <<'__SUSE_RDA_PY_EOF__'\n" + filter_script_src + "\n__SUSE_RDA_PY_EOF__", echo_off=True, quiet=True)
+
     # Speed: skip helm dep update when the cache is fresh.
     #   - --skip-refresh: don't update the 15+ helm repos (metallb, harbor,
     #     longhorn, rancher, ...). Wasted work because our deps use oci://
@@ -415,6 +604,16 @@ if __name__ == "__main__":
         '    [ -d "$sub" ] || continue; ' +
         '    [ -f "$sub/Chart.yaml" ] || continue; ' +
         '    grep -q "^dependencies:" "$sub/Chart.yaml" || continue; ' +
+        # Filter the library's deps down to only what's enabled in the
+        # project's values. Cuts AppCo OCI pulls from N (every catalog
+        # chart) to k (only the ones services[] turned on) per scenario.
+        # Reads the project's values.yaml + rda render's overlay so the
+        # filter sees both static + DSL-derived enabled flags. Idempotent:
+        # backs up to Chart.yaml.full on first run, re-derives every run
+        # so disable→enable cycles work.
+        '    python3 "' + filter_script_path + '" "$sub" ' +
+        '      "' + chart_path + '/values.yaml" ' +
+        '      "' + chart_path + '/.rda/values.generated.yaml" || true; ' +
         # Fast-path: lock fresh AND charts/ populated -> skip update.
         '    if [ -f "$sub/Chart.lock" ] && [ "$sub/Chart.lock" -nt "$sub/Chart.yaml" ] && ' +
         '       [ -d "$sub/charts" ] && [ -n "$(ls -A "$sub/charts" 2>/dev/null)" ]; then ' +
