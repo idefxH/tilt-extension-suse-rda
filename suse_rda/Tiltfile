@@ -86,29 +86,35 @@ LANGUAGE_DEFAULTS = {
         'live_update_install_cmd': None,
     },
     'go': {
-        # heroku/go ONLY. Do NOT add heroku/procfile.
+        # heroku/go + heroku/procfile. The procfile buildpack registers
+        # a `dev` process that runs `air` (live-reload tool). Live
+        # update syncs source files to /workspace/, air's watcher sees
+        # the change, kills the old binary, recompiles, re-execs.
+        # Sub-2s cycle vs. ~14s for a full `pack build` rebuild.
         #
-        # When a Procfile is present, heroku/procfile takes over launch
-        # process registration and emits Procfile entries verbatim:
-        # `web: bin/app` runs literally as `bin/app`, but the launcher's
-        # PATH is `/cnb/process:/cnb/lifecycle:/usr/local/sbin:...` —
-        # it does NOT include the heroku_go layer's bin dir
-        # (/layers/heroku_go/go_target/bin) where the actual binary
-        # lives. The pod CrashLoops with "bin/app: No such file".
-        #
-        # Without heroku/procfile, heroku/go auto-registers the default
-        # process pointing at the absolute path of the compiled binary.
-        # The Procfile in the project template is then ignored at
-        # launch time (it's still useful for local `pack run --process
-        # dev` invocations, but Tilt's pack_default_process='web'
-        # picks up heroku/go's auto-registration).
-        'buildpacks': ['heroku/go'],
-        'live_update_paths': [],
-        'live_update_install_trigger': [],
-        'live_update_install_cmd': None,
-        # Tilt builds use heroku/go's auto-registered `web` process —
-        # the compiled binary at /layers/heroku_go/go_target/bin/<name>.
-        'pack_default_process': 'web',
+        # The previous design (heroku/go alone, no procfile, custom_build
+        # rebuilds on every save) is what made Go feel ~10x slower than
+        # nodejs's --watch — every save triggered the full pack
+        # lifecycle: analyze + detect + restore + build + export +
+        # k8s_yaml. Adding a live_update path + air-as-dev-process
+        # closes the gap.
+        'buildpacks': ['heroku/go', 'heroku/procfile'],
+        # Sync changed sources into the running container; air does
+        # the rest. Empty would mean "rebuild via pack on every save"
+        # which is the slow path we're trying to escape.
+        'live_update_paths': ['./'],
+        'live_update_install_trigger': ['./go.mod', './go.sum'],
+        # When go.mod / go.sum change, re-fetch deps + the air binary.
+        # `go mod download` is cheap when cache is warm; refreshing
+        # tools (incl. air) ensures `go tool air` resolves the right
+        # version. Soft-fail (|| true) keeps the inner loop going if
+        # network is flaky.
+        'live_update_install_cmd':
+            'cd /workspace && go mod download 2>/dev/null || true',
+        # heroku/procfile's `dev` process runs air. heroku/go's
+        # auto-registered `web` (compiled binary) is unused at tilt
+        # up; the production launch in CI/staging keeps using `web`.
+        'pack_default_process': 'dev',
     },
 }
 
