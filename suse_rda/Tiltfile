@@ -477,11 +477,23 @@ def _yaml():
         import yaml
         return yaml
     except ImportError:
+        # Fail loud, NOT silent. If PyYAML is missing the filter cannot
+        # run, every helm dep update pulls every catalogued sub-chart,
+        # and any HTTP-source repo (e.g. dex on charts.dexidp.io) that
+        # isn't in `helm repo list` triggers a confusing `no cached
+        # repository for helm-manager-<hash>` error several layers down.
+        # Exit 2 so the caller's `|| { ... }` branch fires with a clear
+        # remediation pointing the dev at python3 -m pip install pyyaml
+        # in the python3 the host's Tilt actually invokes (which on
+        # macOS may differ from the conda one in the dev's shell).
         sys.stderr.write(
-            "[filter_enabled_deps] PyYAML not installed; "
-            "pip3 install pyyaml or run with python3 -m pip install pyyaml\n"
+            "[filter_enabled_deps] PyYAML not installed in this python3 "
+            "({0}); install with: python3 -m pip install --break-system-packages pyyaml\n"
+            "(check `which python3` from the same env Tilt runs in — on macOS "
+            "the host's /usr/bin/python3 is often distinct from your shell's.)\n"
+            .format(sys.executable)
         )
-        sys.exit(0)
+        sys.exit(2)
 
 
 def enabled_charts(values_files):
@@ -576,16 +588,32 @@ def main(library_dir, *values_files):
     out = dict(full)  # shallow copy
     out["dependencies"] = kept
 
-    with open(chart_yaml, "w") as f:
-        yaml.safe_dump(out, f, default_flow_style=False, sort_keys=False)
+    new_content = yaml.safe_dump(out, default_flow_style=False, sort_keys=False)
+    # IDEMPOTENT WRITE: only touch Chart.yaml if the content actually
+    # differs. Without this guard, Tilt sees Chart.yaml change every
+    # reload (because we always rewrite), reloads the Tiltfile (the chart
+    # tree is in its watch set), which re-runs this script, which writes
+    # again — infinite loop. Tilt's fast-path
+    # `Chart.lock newer than Chart.yaml` also never triggers because
+    # we keep bumping Chart.yaml's mtime. See tilt-extension #URGENT.
+    try:
+        with open(chart_yaml) as f:
+            cur_content = f.read()
+    except OSError:
+        cur_content = None
+    wrote = (cur_content != new_content)
+    if wrote:
+        with open(chart_yaml, "w") as f:
+            f.write(new_content)
 
     skipped = len(full_deps) - len(kept)
+    suffix = "" if wrote else " (unchanged on disk)"
     print(
         "[suse_rda] filter_enabled_deps: kept {0}/{1} sub-chart(s) "
-        "[{2}]; skipped {3} disabled".format(
+        "[{2}]; skipped {3} disabled{4}".format(
             len(kept), len(full_deps),
             ", ".join(sorted([d.get("name", "?") for d in kept])) or "none",
-            skipped,
+            skipped, suffix,
         ),
         flush=True,
     )
@@ -599,6 +627,137 @@ if __name__ == "__main__":
     main(*sys.argv[1:])
 '''
     local('cat > ' + filter_script_path + " <<'__SUSE_RDA_PY_EOF__'\n" + filter_script_src + "\n__SUSE_RDA_PY_EOF__", echo_off=True, quiet=True)
+
+    # Pre-flight helper: ensure every non-OCI repo URL referenced by the
+    # library Chart.yaml is registered with `helm repo add` BEFORE
+    # `helm dep update --skip-refresh` runs. Without this, the first
+    # `tilt up` of any project that vendors a library with a fresh HTTP
+    # source (e.g. dex on charts.dexidp.io) crashes with a confusing
+    #   `Error: no cached repository for helm-manager-<sha>`
+    # because `--skip-refresh` forbids the on-the-fly index fetch.
+    #
+    # OCI repos (oci://dp.apps.rancher.io/charts) are skipped — Helm
+    # talks to them directly without an index cache.
+    bootstrap_repos_script_path = '/tmp/_suse_rda_bootstrap_helm_repos.py'
+    bootstrap_repos_script_src = r'''#!/usr/bin/env python3
+"""
+Walk a library chart's Chart.yaml.full (or Chart.yaml as fallback) and
+ensure every HTTP/HTTPS repository: URL is registered with helm. We
+read .full because filter_enabled_deps strips Chart.yaml down to the
+enabled subset — but a previously-disabled chart on an HTTP repo could
+get re-enabled later, and we want the index ready when it does.
+
+OCI repos are skipped (Helm doesn't cache an index for them).
+Idempotent: helm repo add fails when a name+url is already registered;
+we tolerate that.
+
+Usage: bootstrap_helm_repos.py <library-chart-dir>
+"""
+import hashlib
+import os
+import re
+import subprocess
+import sys
+
+
+def _yaml():
+    try:
+        import yaml
+        return yaml
+    except ImportError:
+        sys.stderr.write(
+            "[bootstrap_helm_repos] PyYAML not installed in this python3 "
+            "({0}); install with: python3 -m pip install --break-system-packages pyyaml\n"
+            .format(sys.executable)
+        )
+        sys.exit(2)
+
+
+def _existing_repo_urls():
+    try:
+        out = subprocess.check_output(
+            ["helm", "repo", "list", "-o", "yaml"],
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return set()
+    yaml = _yaml()
+    data = yaml.safe_load(out) or []
+    return {(item.get("name"), item.get("url")) for item in data if isinstance(item, dict)}
+
+
+def _safe_name_for_url(url):
+    # Helm repo names are short ascii. Use a slugified host + 6-char hash
+    # so reruns produce the same name and `helm repo add` is idempotent.
+    host = re.sub(r"^https?://", "", url).split("/")[0]
+    slug = re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-") or "repo"
+    short = hashlib.sha256(url.encode()).hexdigest()[:6]
+    return "rda-{0}-{1}".format(slug, short)
+
+
+def main(library_dir):
+    chart_yaml = os.path.join(library_dir, "Chart.yaml.full")
+    if not os.path.isfile(chart_yaml):
+        chart_yaml = os.path.join(library_dir, "Chart.yaml")
+    if not os.path.isfile(chart_yaml):
+        return
+    yaml = _yaml()
+    with open(chart_yaml) as f:
+        doc = yaml.safe_load(f) or {}
+    deps = doc.get("dependencies") or []
+    http_urls = sorted({
+        d.get("repository", "").strip()
+        for d in deps if isinstance(d, dict)
+        and isinstance(d.get("repository"), str)
+        and d["repository"].startswith(("http://", "https://"))
+    })
+    if not http_urls:
+        return
+    existing = _existing_repo_urls()
+    existing_urls = {url for _, url in existing}
+    added = []
+    for url in http_urls:
+        if url in existing_urls:
+            continue
+        name = _safe_name_for_url(url)
+        try:
+            subprocess.check_call(
+                ["helm", "repo", "add", name, url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+            )
+            added.append((name, url))
+        except subprocess.CalledProcessError:
+            # Likely already registered under a different name — fine,
+            # let the subsequent --skip-refresh step succeed regardless.
+            pass
+    if added:
+        print(
+            "[suse_rda] bootstrapped {0} HTTP helm repo(s): {1}".format(
+                len(added), ", ".join(u for _, u in added)
+            ),
+            flush=True,
+        )
+        # The added repos have no cached index yet; refresh just them.
+        # `helm repo update <names>` is the targeted form (3.13+).
+        try:
+            subprocess.check_call(
+                ["helm", "repo", "update"] + [n for n, _ in added],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.STDOUT,
+            )
+        except subprocess.CalledProcessError:
+            # Older helm: untargeted update is the fallback.
+            subprocess.call(["helm", "repo", "update"], stdout=subprocess.DEVNULL)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("usage: bootstrap_helm_repos.py <library-chart-dir>", file=sys.stderr)
+        sys.exit(2)
+    main(sys.argv[1])
+'''
+    local('cat > ' + bootstrap_repos_script_path + " <<'__SUSE_RDA_PY_EOF__'\n" + bootstrap_repos_script_src + "\n__SUSE_RDA_PY_EOF__", echo_off=True, quiet=True)
 
     # Speed: skip helm dep update when the cache is fresh.
     #   - --skip-refresh: don't update the 15+ helm repos (metallb, harbor,
@@ -624,9 +783,22 @@ if __name__ == "__main__":
         # filter sees both static + DSL-derived enabled flags. Idempotent:
         # backs up to Chart.yaml.full on first run, re-derives every run
         # so disable→enable cycles work.
+        # No `|| true` here: a missing PyYAML / parse error / write error
+        # in the filter would leave Chart.yaml un-filtered and helm
+        # would pull every catalog entry, including HTTP-source repos
+        # the user hasn't registered. Better to fail loud with the
+        # filter's own remediation message than to mask it as a
+        # downstream `helm-manager-<sha>` cache miss two layers later.
         '    python3 "' + filter_script_path + '" "$sub" ' +
         '      "' + chart_path + '/values.yaml" ' +
-        '      "' + chart_path + '/.rda/values.generated.yaml" || true; ' +
+        '      "' + chart_path + '/.rda/values.generated.yaml" || ' +
+        '      { echo "[suse_rda] FATAL: filter_enabled_deps.py failed for $sub"; exit 1; }; ' +
+        # Pre-flight: register any non-OCI helm repo referenced by the
+        # library Chart.yaml.full, so the subsequent
+        # `helm dep update --skip-refresh` can find their indexes.
+        # Idempotent + cheap. PyYAML required (already enforced above).
+        '    python3 "' + bootstrap_repos_script_path + '" "$sub" || ' +
+        '      { echo "[suse_rda] FATAL: bootstrap_helm_repos.py failed for $sub"; exit 1; }; ' +
         # Fast-path: lock fresh AND charts/ populated -> skip update.
         '    if [ -f "$sub/Chart.lock" ] && [ "$sub/Chart.lock" -nt "$sub/Chart.yaml" ] && ' +
         '       [ -d "$sub/charts" ] && [ -n "$(ls -A "$sub/charts" 2>/dev/null)" ]; then ' +
