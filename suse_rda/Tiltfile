@@ -339,6 +339,19 @@ import shutil
 import sys
 import tarfile
 
+def _safe_extract(tf, dest):
+    # py3.12+ added the `filter` kwarg + the data_filter helper.
+    # py<3.12 doesn't accept `filter=` — fall back to the legacy
+    # extractall() (no member sanitisation). Acceptable here because
+    # the input is a chart .tgz we just downloaded from our own
+    # registry and helm dep update validated.
+    if hasattr(tarfile, 'data_filter'):
+        tf.extractall(dest, filter='data')
+    else:
+        tf.extractall(dest)
+
+
+
 # We import yaml lazily so a missing PyYAML doesn't crash on charts that
 # need no patching.
 def _yaml():
@@ -375,7 +388,7 @@ def main(parent_dir):
         os.makedirs(work)
         try:
             with tarfile.open(tgz, "r:gz") as tf:
-                tf.extractall(work, filter='data')  # py3.14+ requires explicit filter for tar safety
+                _safe_extract(tf, work)  # tarfile filter handling — py3.12+ supports `filter='data'`, older python doesn't
             inner = next(
                 (d for d in os.listdir(work) if os.path.isdir(os.path.join(work, d))),
                 None,
