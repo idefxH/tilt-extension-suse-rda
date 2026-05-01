@@ -270,14 +270,13 @@ def suse_app(
     #     needs a host-side go binary)
     if language == 'go' and os.path.exists('go.mod'):
         local(
-            "set -e; "
-            "if ! command -v go >/dev/null 2>&1; then "
-            "echo '[suse_rda] go not on PATH — skipping go mod tidy preflight "
-            "(if pack build fails on missing go.sum, install Go locally OR "
-            "ship go.sum in your project)' >&2; exit 0; fi; "
-            "if [ ! -f go.sum ] || [ go.mod -nt go.sum ]; then "
-            "echo '[suse_rda] running go mod tidy (go.sum missing or stale)'; "
-            "go mod tidy; "
+            "set -e; " +
+            "if ! command -v go >/dev/null 2>&1; then " +
+            "echo '[suse_rda] go not on PATH; skipping go mod tidy preflight' >&2; " +
+            "exit 0; fi; " +
+            "if [ ! -f go.sum ] || [ go.mod -nt go.sum ]; then " +
+            "echo '[suse_rda] running go mod tidy (go.sum missing or stale)'; " +
+            "go mod tidy; " +
             "fi",
             quiet=False, echo_off=True,
         )
@@ -395,7 +394,7 @@ def _yaml():
         return yaml
     except ImportError:
         sys.stderr.write(
-            "[align_subchart_versions] PyYAML not installed; "
+            "[align_subchart_versions] PyYAML not installed; " +
             "pip3 install pyyaml or run with python3 -m pip install pyyaml\n"
         )
         sys.exit(0)
@@ -522,9 +521,9 @@ def _yaml():
         # in the python3 the host's Tilt actually invokes (which on
         # macOS may differ from the conda one in the dev's shell).
         sys.stderr.write(
-            "[filter_enabled_deps] PyYAML not installed in this python3 "
-            "({0}); install with: python3 -m pip install --break-system-packages pyyaml\n"
-            "(check `which python3` from the same env Tilt runs in — on macOS "
+            "[filter_enabled_deps] PyYAML not installed in this python3 " +
+            "({0}); install with: python3 -m pip install --break-system-packages pyyaml\n" +
+            "(check `which python3` from the same env Tilt runs in — on macOS " +
             "the host's /usr/bin/python3 is often distinct from your shell's.)\n"
             .format(sys.executable)
         )
@@ -618,7 +617,13 @@ def main(library_dir, *values_files):
         # `helm dep update`, which becomes a no-op.
         kept = []
     else:
-        kept = [d for d in full_deps if d.get("name") in enabled]
+        # Compare against the user-facing chart key, which is the helm
+        # `alias` when present (so `dex-idp` aliased as `dex` matches
+        # services[].type=dex), or the bare `name` otherwise. Without
+        # this, aliased deps get stripped silently and the user sees
+        # `unknown resource <release>-<binding>` when the tilt-ext
+        # tries to wire a k8s_resource that helm never rendered.
+        kept = [d for d in full_deps if d.get("alias", d.get("name")) in enabled]
 
     out = dict(full)  # shallow copy
     out["dependencies"] = kept
@@ -644,7 +649,7 @@ def main(library_dir, *values_files):
     skipped = len(full_deps) - len(kept)
     suffix = "" if wrote else " (unchanged on disk)"
     print(
-        "[suse_rda] filter_enabled_deps: kept {0}/{1} sub-chart(s) "
+        "[suse_rda] filter_enabled_deps: kept {0}/{1} sub-chart(s) " +
         "[{2}]; skipped {3} disabled{4}".format(
             len(kept), len(full_deps),
             ", ".join(sorted([d.get("name", "?") for d in kept])) or "none",
@@ -701,7 +706,7 @@ def _yaml():
         return yaml
     except ImportError:
         sys.stderr.write(
-            "[bootstrap_helm_repos] PyYAML not installed in this python3 "
+            "[bootstrap_helm_repos] PyYAML not installed in this python3 " +
             "({0}); install with: python3 -m pip install --break-system-packages pyyaml\n"
             .format(sys.executable)
         )
@@ -982,54 +987,54 @@ if __name__ == "__main__":
     # whatever distribution mechanism wrote it first, we don't touch.
     if os.getenv('SUSE_RDA_SKIP_PULLSECRET_MIRROR', '') != '1':
         local(
-            "set -e; "
+            "set -e; " +
             # Step 0: target NS already has the Secret — done.
-            "if kubectl get secret -n " + namespace + " application-collection "
-            ">/dev/null 2>&1; then exit 0; fi; "
+            "if kubectl get secret -n " + namespace + " application-collection " +
+            ">/dev/null 2>&1; then exit 0; fi; " +
             # Step 0b: target NS is operator-managed via label.
-            "if [ \"$(kubectl get ns " + namespace + " -o "
-            "jsonpath='{.metadata.labels.rda\\.suse\\.com/pullsecret-managed-by}' "
-            "2>/dev/null)\" = 'operator' ]; then "
-            "echo '[suse_rda] skipping pullsecret mirror "
-            "(ns " + namespace + " labelled rda.suse.com/pullsecret-managed-by=operator)'; "
-            "exit 0; fi; "
+            "if [ \"$(kubectl get ns " + namespace + " -o " +
+            "jsonpath='{.metadata.labels.rda\\.suse\\.com/pullsecret-managed-by}' " +
+            "2>/dev/null)\" = 'operator' ]; then " +
+            "echo '[suse_rda] skipping pullsecret mirror " +
+            "(ns " + namespace + " labelled rda.suse.com/pullsecret-managed-by=operator)'; " +
+            "exit 0; fi; " +
             # Step 0c: source Secret is operator-managed (ESO / reflector).
             # Don't fight the operator — step back and let its controller
             # propagate to the project NS on its own.
-            "if [ -n \"$(kubectl get secret -n default application-collection -o "
-            "jsonpath='{.metadata.annotations.external-secrets\\.io/owned-by}' "
-            "2>/dev/null)\" ]; then "
-            "echo '[suse_rda] skipping pullsecret mirror "
-            "(default Secret has external-secrets.io annotation; ESO will distribute)'; "
-            "exit 0; fi; "
-            "if [ \"$(kubectl get secret -n default application-collection -o "
-            "jsonpath='{.metadata.annotations.reflector\\.v1\\.k8s\\.emberstack\\.com/reflection-allowed}' "
-            "2>/dev/null)\" = 'true' ]; then "
-            "echo '[suse_rda] skipping pullsecret mirror "
-            "(default Secret has reflector annotation; kubernetes-reflector will distribute)'; "
-            "exit 0; fi; "
+            "if [ -n \"$(kubectl get secret -n default application-collection -o " +
+            "jsonpath='{.metadata.annotations.external-secrets\\.io/owned-by}' " +
+            "2>/dev/null)\" ]; then " +
+            "echo '[suse_rda] skipping pullsecret mirror " +
+            "(default Secret has external-secrets.io annotation; ESO will distribute)'; " +
+            "exit 0; fi; " +
+            "if [ \"$(kubectl get secret -n default application-collection -o " +
+            "jsonpath='{.metadata.annotations.reflector\\.v1\\.k8s\\.emberstack\\.com/reflection-allowed}' " +
+            "2>/dev/null)\" = 'true' ]; then " +
+            "echo '[suse_rda] skipping pullsecret mirror " +
+            "(default Secret has reflector annotation; kubernetes-reflector will distribute)'; " +
+            "exit 0; fi; " +
             # Step 1: source missing — loud fail.
-            "if ! kubectl get secret -n default application-collection "
-            ">/dev/null 2>&1; then "
-            "echo '[suse_rda] FATAL: Secret/application-collection not found "
-            "in `default` (the AppCo Rancher Desktop extension would normally "
-            "install it there). Either install/launch the AppCo extension, "
-            "OR run `helm registry login dp.apps.rancher.io` then bootstrap "
-            "the Secret manually via kubectl create secret docker-registry; "
-            "OR set SUSE_RDA_SKIP_PULLSECRET_MIRROR=1 if your cluster uses "
-            "kubernetes-reflector / External Secrets to distribute it.' >&2; "
-            "exit 1; fi; "
+            "if ! kubectl get secret -n default application-collection " +
+            ">/dev/null 2>&1; then " +
+            "echo '[suse_rda] FATAL: Secret/application-collection not found " +
+            "in `default` (the AppCo Rancher Desktop extension would normally " +
+            "install it there). Either install/launch the AppCo extension, " +
+            "OR run `helm registry login dp.apps.rancher.io` then bootstrap " +
+            "the Secret manually via kubectl create secret docker-registry; " +
+            "OR set SUSE_RDA_SKIP_PULLSECRET_MIRROR=1 if your cluster uses " +
+            "kubernetes-reflector / External Secrets to distribute it.' >&2; " +
+            "exit 1; fi; " +
             # sed strips instance-bound metadata (namespace + uid +
             # resourceVersion + creationTimestamp) so the doc is
             # namespace-portable. kubectl apply -n <target> then anchors
             # it to the deploy NS. No jq dep — macOS doesn't ship one.
-            "kubectl get secret -n default application-collection -o yaml | "
-            "sed -e '/^  namespace:/d' "
-            "-e '/^  uid:/d' "
-            "-e '/^  resourceVersion:/d' "
-            "-e '/^  creationTimestamp:/d' | "
-            "kubectl apply -n " + namespace + " -f - >/dev/null && "
-            "echo '[suse_rda] mirrored Secret/application-collection "
+            "kubectl get secret -n default application-collection -o yaml | " +
+            "sed -e '/^  namespace:/d' " +
+            "-e '/^  uid:/d' " +
+            "-e '/^  resourceVersion:/d' " +
+            "-e '/^  creationTimestamp:/d' | " +
+            "kubectl apply -n " + namespace + " -f - >/dev/null && " +
+            "echo '[suse_rda] mirrored Secret/application-collection " +
             "default -> " + namespace + "'",
             quiet=False, echo_off=True)
 
