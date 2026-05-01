@@ -929,14 +929,51 @@ if __name__ == "__main__":
     #   3. Else loud failure with the remediation hint pointing at
     #      `helm registry login` + the AppCo extension docs.
     #
-    # Skipped via SUSE_RDA_SKIP_PULLSECRET_MIRROR=1 for the air-gapped
-    # / kubernetes-reflector / ESO setups where the operator handles
-    # distribution another way.
+    # Three escape hatches to coexist with operator-managed distribution
+    # (kubernetes-reflector / External Secrets / GitOps / manual):
+    #
+    #   1. Env var SUSE_RDA_SKIP_PULLSECRET_MIRROR=1 (cluster-wide).
+    #   2. Namespace label rda.suse.com/pullsecret-managed-by=operator
+    #      — set this on a project NS to declare "an operator owns the
+    #      pullsecret here, hands off". Per-NS, persistent in YAML.
+    #   3. Source-side annotation: if Secret/application-collection in
+    #      `default` carries `external-secrets.io/owned-by` or
+    #      `reflector.v1.k8s.emberstack.com/reflection-allowed=true` we
+    #      take that as proof an operator distributes it and we step
+    #      back — letting the operator's controller reconcile in its
+    #      own time on the project NS.
+    #
+    # Step 0 (target-NS already has it) is the universal safety net:
+    # whatever distribution mechanism wrote it first, we don't touch.
     if os.getenv('SUSE_RDA_SKIP_PULLSECRET_MIRROR', '') != '1':
         local(
             "set -e; "
+            # Step 0: target NS already has the Secret — done.
             "if kubectl get secret -n " + namespace + " application-collection "
             ">/dev/null 2>&1; then exit 0; fi; "
+            # Step 0b: target NS is operator-managed via label.
+            "if [ \"$(kubectl get ns " + namespace + " -o "
+            "jsonpath='{.metadata.labels.rda\\.suse\\.com/pullsecret-managed-by}' "
+            "2>/dev/null)\" = 'operator' ]; then "
+            "echo '[suse_rda] skipping pullsecret mirror "
+            "(ns " + namespace + " labelled rda.suse.com/pullsecret-managed-by=operator)'; "
+            "exit 0; fi; "
+            # Step 0c: source Secret is operator-managed (ESO / reflector).
+            # Don't fight the operator — step back and let its controller
+            # propagate to the project NS on its own.
+            "if [ -n \"$(kubectl get secret -n default application-collection -o "
+            "jsonpath='{.metadata.annotations.external-secrets\\.io/owned-by}' "
+            "2>/dev/null)\" ]; then "
+            "echo '[suse_rda] skipping pullsecret mirror "
+            "(default Secret has external-secrets.io annotation; ESO will distribute)'; "
+            "exit 0; fi; "
+            "if [ \"$(kubectl get secret -n default application-collection -o "
+            "jsonpath='{.metadata.annotations.reflector\\.v1\\.k8s\\.emberstack\\.com/reflection-allowed}' "
+            "2>/dev/null)\" = 'true' ]; then "
+            "echo '[suse_rda] skipping pullsecret mirror "
+            "(default Secret has reflector annotation; kubernetes-reflector will distribute)'; "
+            "exit 0; fi; "
+            # Step 1: source missing — loud fail.
             "if ! kubectl get secret -n default application-collection "
             ">/dev/null 2>&1; then "
             "echo '[suse_rda] FATAL: Secret/application-collection not found "
