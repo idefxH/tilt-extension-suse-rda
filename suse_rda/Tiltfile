@@ -1354,9 +1354,14 @@ if __name__ == "__main__":
             svc_port = SERVICE_PORTS[service_type]
 
         if svc_port:
+            # Ports < 1024 require root — map to a higher local port.
+            # e.g. prometheus Service port 80 → localhost:10080
+            local_port = svc_port
+            if local_port < 1024:
+                local_port = svc_port + 10000
             k8s_resource(
                 workload=workload,
-                port_forwards='%d:%d' % (svc_port, svc_port),
+                port_forwards='%d:%d' % (local_port, svc_port),
                 labels=[labels.get(workload, 'services')],
                 links=svc_links,
             )
