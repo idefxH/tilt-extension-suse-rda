@@ -163,7 +163,7 @@ def suse_app(
             chart_values_files** — every entry in `suse-library.services[]`
             (the unified DSL) and every chart with `suse-library.<chart>.enabled:
             true` (the legacy gate) is registered. This is the recommended
-            mode: `rda add-service <type> <binding>` updates values.yaml,
+            mode: `rda service add <type> <binding>` updates values.yaml,
             and Tilt picks up the change on the next reload — nothing in the
             Tiltfile needs to be in lockstep with values.yaml.
             Pass an explicit dict to opt out of auto-discovery (e.g. to
@@ -529,7 +529,7 @@ def enabled_charts(values_files):
       1. Static `<chart>.enabled: true` under `suse-library` (legacy).
       2. rda render overlay's `suse-library.<chart>.enabled: true`.
       3. DSL `services[]` entries — `services[i].type` + `enabled: true`
-         (the modern path, what `rda add-service` writes). Critical:
+         (the modern path, what `rda service add` writes). Critical:
          this filter runs BEFORE `rda render` regenerates the overlay,
          so we can't rely on shape #2 alone — services[] is the only
          source of truth at filter-time on a fresh project.
