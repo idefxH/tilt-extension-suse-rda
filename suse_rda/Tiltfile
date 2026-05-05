@@ -1405,7 +1405,6 @@ if __name__ == "__main__":
         if not svc_port and service_type in SERVICE_PORTS:
             svc_port = SERVICE_PORTS[service_type]
 
-        print("[suse_rda] registering workload=%s binding=%s alias=%s port=%s links=%s" % (workload, binding_name, chart_alias, svc_port, svc_links))
         if svc_port:
             local_port = svc_port
             if local_port < 1024:
