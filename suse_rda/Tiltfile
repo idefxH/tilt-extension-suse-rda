@@ -566,16 +566,24 @@ def enabled_charts(values_files):
             # walk; staying consistent here matters.
             services = sl.get("services") or []
             if isinstance(services, list):
+                # Count types for multi-instance alias computation (#24).
+                type_counts = {}
+                for entry in services:
+                    if isinstance(entry, dict) and entry.get("type"):
+                        t = entry["type"]
+                        type_counts[t] = type_counts.get(t, 0) + 1
                 for entry in services:
                     if not isinstance(entry, dict):
                         continue
-                    # Default-when-missing: true (back-compat with pre-
-                    # 0.1.38 scaffolds that didn't write the field).
                     if entry.get("enabled", True) is False:
                         continue
                     chart_type = entry.get("type")
+                    binding = entry.get("binding", "")
                     if chart_type:
                         enabled.add(chart_type)
+                        # Multi-instance: also add the aliased name.
+                        if type_counts.get(chart_type, 0) > 1 and binding:
+                            enabled.add(chart_type + "-" + binding)
         # Top-level fallback (legacy / non-DSL projects).
         for name, sub in data.items():
             if name in SKIP_TOP:
@@ -604,18 +612,57 @@ def main(library_dir, *values_files):
         return  # nothing to filter
 
     enabled = enabled_charts(values_files)
+
+    # Multi-instance aliasing (#24): expand deps for types with
+    # multiple bindings. Read services[] to find multi-instance types,
+    # then duplicate the original dep entry with per-binding aliases.
+    expanded_deps = list(full_deps)
+    multi_aliases = {}  # type → [alias1, alias2, ...]
+    for path in values_files:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path) as f:
+                data = _yaml().safe_load(f) or {}
+        except Exception:
+            continue
+        sl = data.get("suse-library")
+        if not isinstance(sl, dict):
+            continue
+        services = sl.get("services") or []
+        if not isinstance(services, list):
+            continue
+        type_bindings = {}
+        for entry in services:
+            if not isinstance(entry, dict):
+                continue
+            t = entry.get("type", "")
+            b = entry.get("binding", "")
+            if t and b:
+                type_bindings.setdefault(t, []).append(b)
+        for t, bindings in type_bindings.items():
+            if len(bindings) > 1:
+                multi_aliases[t] = [t + "-" + b for b in bindings]
+
+    if multi_aliases:
+        new_deps = []
+        for d in expanded_deps:
+            ename = d.get("alias", d.get("name"))
+            if ename in multi_aliases:
+                # Replace single dep with N aliased deps.
+                for alias in multi_aliases[ename]:
+                    aliased = dict(d)
+                    aliased["alias"] = alias
+                    aliased["condition"] = alias + ".enabled"
+                    new_deps.append(aliased)
+            else:
+                new_deps.append(d)
+        expanded_deps = new_deps
+
     if not enabled:
-        # No services enabled. Strip ALL deps — fastest possible
-        # `helm dep update`, which becomes a no-op.
         kept = []
     else:
-        # Compare against the user-facing chart key, which is the helm
-        # `alias` when present (so `dex-idp` aliased as `dex` matches
-        # services[].type=dex), or the bare `name` otherwise. Without
-        # this, aliased deps get stripped silently and the user sees
-        # `unknown resource <release>-<binding>` when the tilt-ext
-        # tries to wire a k8s_resource that helm never rendered.
-        kept = [d for d in full_deps if d.get("alias", d.get("name")) in enabled]
+        kept = [d for d in expanded_deps if d.get("alias", d.get("name")) in enabled]
 
     out = dict(full)  # shallow copy
     out["dependencies"] = kept
@@ -1282,54 +1329,54 @@ if __name__ == "__main__":
     mappings_doc = read_yaml(mappings_path, default={'charts': {}})
     catalogued_charts = mappings_doc.get('charts', {})
 
-    def workload_name_for(release, service_type):
-        """Compute the rendered K8s workload name for a service type.
+    def workload_name_for(release, chart_alias, service_type):
+        """Compute the rendered K8s workload name for a chart alias.
 
-        dsl-mappings.yaml service.host is the FQDN since NS Phase C
-        (e.g. '<release>-postgresql.<ns>.svc.cluster.local') so that
-        cross-namespace shared bindings can resolve. But Tilt's
-        k8s_resource(workload=...) wants the SHORT NAME (the Service /
-        Deployment name within the namespace, e.g. '<release>-postgresql').
-        We render the template, then strip everything from the first '.'
-        onwards.
+        For single-instance types, chart_alias == service_type (backward compat).
+        For multi-instance types, chart_alias == <type>-<binding> and the
+        host template is adjusted accordingly.
         """
         chart_entry = catalogued_charts.get(service_type, {})
         versions = chart_entry.get('versions', [])
         if not versions:
-            return release + '-' + service_type
-        # versions[0] is fine for now — Phase 2 can match against the
-        # actually-vendored chart version via semverCompare.
+            return release + '-' + chart_alias
         host_tpl = versions[0].get('service', {}).get('host', '')
         if not host_tpl:
-            return release + '-' + service_type
-        # Render the (very limited) Go template subset used in
-        # dsl-mappings.yaml: just substitute {{ .Release.Name }} (with or
-        # without spaces). Anything richer would need a real Go template
-        # engine, which Starlark doesn't have.
+            return release + '-' + chart_alias
+        # For multi-instance, replace the type in the host template with the alias.
+        if chart_alias != service_type:
+            host_tpl = host_tpl.replace('-' + service_type + '.', '-' + chart_alias + '.', 1)
         rendered = host_tpl.replace('{{ .Release.Name }}', release).replace('{{.Release.Name}}', release)
-        # Trim the FQDN suffix — Tilt workload names are short.
         if '.' in rendered:
             rendered = rendered.split('.', 1)[0]
         return rendered
 
-    seen_workloads = {}
+    # Compute chart aliases for multi-instance support (#24).
+    # Same convention as the CLI: single-instance types keep the bare type,
+    # multi-instance types get <type>-<binding> for ALL instances.
+    type_counts = {}
     for binding_name, service_type in services.items():
-        workload = workload_name_for(name, service_type)
-        # Two bindings of the same type collapse to one workload —
-        # register it once.
-        if workload in seen_workloads:
-            continue
-        seen_workloads[workload] = True
+        type_counts[service_type] = type_counts.get(service_type, 0) + 1
 
-        # Sub-chart ingress lookup. Grafana uses <chart>.ingress (flat).
-        # Prometheus is special: the upstream chart puts the server
-        # ingress under <chart>.server.ingress. Add more service types
-        # here as the bundle grows.
+    aliases = {}  # binding → chart_alias
+    for binding_name, service_type in services.items():
+        if type_counts[service_type] == 1:
+            aliases[binding_name] = service_type
+        else:
+            aliases[binding_name] = service_type + '-' + binding_name
+
+    used_local_ports = {}
+    for binding_name, service_type in services.items():
+        chart_alias = aliases[binding_name]
+        workload = workload_name_for(name, chart_alias, service_type)
+
+        # Sub-chart ingress lookup. Use chart_alias for values lookup
+        # (multi-instance values are keyed by alias, not bare type).
         svc_links = []
         for cfg in parsed_values:
-            svc_links.extend(_ingress_links(_suse_lib_block(cfg, service_type)))
+            svc_links.extend(_ingress_links(_suse_lib_block(cfg, chart_alias)))
             if service_type == 'prometheus':
-                svc_links.extend(_ingress_links(_suse_lib_block(cfg, service_type, 'server')))
+                svc_links.extend(_ingress_links(_suse_lib_block(cfg, chart_alias, 'server')))
 
         # Resolve port from dsl-mappings.yaml (data-driven), with
         # SERVICE_PORTS as fallback for older bundles / unlisted charts.
@@ -1354,11 +1401,13 @@ if __name__ == "__main__":
             svc_port = SERVICE_PORTS[service_type]
 
         if svc_port:
-            # Ports < 1024 require root — map to a higher local port.
-            # e.g. prometheus Service port 80 → localhost:10080
             local_port = svc_port
             if local_port < 1024:
                 local_port = svc_port + 10000
+            # Avoid port collisions for multi-instance same-type services.
+            while local_port in used_local_ports:
+                local_port += 1
+            used_local_ports[local_port] = True
             k8s_resource(
                 workload=workload,
                 port_forwards='%d:%d' % (local_port, svc_port),
