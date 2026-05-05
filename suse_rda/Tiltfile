@@ -1238,10 +1238,15 @@ if __name__ == "__main__":
                 if entry.get('binding'):
                     all_services_by_binding[entry['binding']] = entry
 
-        def _chart_enabled(stype):
+        def _chart_enabled(stype, binding=''):
             for lib in all_lib_blocks:
                 if (lib.get(stype, {}) or {}).get('enabled'):
                     return True
+                # Multi-instance: check aliased block (<type>-<binding>).
+                if binding:
+                    alias = stype + '-' + binding
+                    if (lib.get(alias, {}) or {}).get('enabled'):
+                        return True
             return False
 
         for binding in all_services_by_binding:
@@ -1265,7 +1270,7 @@ if __name__ == "__main__":
             # Belt-and-braces: at least one cfg must have <chart>.enabled
             # true, otherwise the sub-chart isn't deployed and we'd
             # register a phantom k8s_resource.
-            if not _chart_enabled(stype):
+            if not _chart_enabled(stype, binding):
                 continue
             if stype:
                 services[binding] = stype
@@ -1400,11 +1405,11 @@ if __name__ == "__main__":
         if not svc_port and service_type in SERVICE_PORTS:
             svc_port = SERVICE_PORTS[service_type]
 
+        print("[suse_rda] registering workload=%s binding=%s alias=%s port=%s links=%s" % (workload, binding_name, chart_alias, svc_port, svc_links))
         if svc_port:
             local_port = svc_port
             if local_port < 1024:
                 local_port = svc_port + 10000
-            # Avoid port collisions for multi-instance same-type services.
             while local_port in used_local_ports:
                 local_port += 1
             used_local_ports[local_port] = True
