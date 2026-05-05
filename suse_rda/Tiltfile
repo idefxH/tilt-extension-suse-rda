@@ -80,7 +80,11 @@ LANGUAGE_DEFAULTS = {
         'live_update_install_cmd': 'cd /workspace && pip install -r requirements.txt 2>/dev/null || true',
     },
     'java': {
-        'buildpacks': ['heroku/java'],
+        # heroku/java compiles via Maven/Gradle. heroku/procfile
+        # reads ./Procfile to register web/dev process types.
+        # Without procfile, the CNB launcher has no default process
+        # and the container crashes with "no default process".
+        'buildpacks': ['heroku/java', 'heroku/procfile'],
         'live_update_paths': [],
         'live_update_install_trigger': [],
         'live_update_install_cmd': None,
