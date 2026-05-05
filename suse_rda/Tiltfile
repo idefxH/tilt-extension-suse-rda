@@ -108,6 +108,10 @@ LANGUAGE_DEFAULTS = {
 
 # Conventional ports for service types declared in `services`. Used by
 # port_forwards so a developer can `psql -h localhost -p 5432`, etc.
+# Legacy hardcoded ports — used as fallback when dsl-mappings.yaml
+# doesn't declare a port for the chart type (older bundles, charts
+# not in the catalog). New charts should declare their port in
+# dsl-mappings.yaml instead of adding to this dict.
 SERVICE_PORTS = {
     'postgresql': 5432,
     'redis': 6379,
@@ -1327,8 +1331,29 @@ if __name__ == "__main__":
             if service_type == 'prometheus':
                 svc_links.extend(_ingress_links(_suse_lib_block(cfg, service_type, 'server')))
 
-        if service_type in SERVICE_PORTS:
+        # Resolve port from dsl-mappings.yaml (data-driven), with
+        # SERVICE_PORTS as fallback for older bundles / unlisted charts.
+        svc_port = 0
+        chart_entry = catalogued_charts.get(service_type, {})
+        chart_versions = chart_entry.get('versions', [])
+        if chart_versions:
+            svc_spec = chart_versions[0].get('service', {})
+            svc_port = svc_spec.get('port', 0)
+            # Multi-port: find the primary port
+            if not svc_port and svc_spec.get('ports'):
+                for pname, pspec in svc_spec['ports'].items():
+                    if pspec.get('primary', False):
+                        svc_port = pspec.get('port', 0)
+                        break
+                # No primary? Take the first one.
+                if not svc_port:
+                    for pname, pspec in svc_spec['ports'].items():
+                        svc_port = pspec.get('port', 0)
+                        break
+        if not svc_port and service_type in SERVICE_PORTS:
             svc_port = SERVICE_PORTS[service_type]
+
+        if svc_port:
             k8s_resource(
                 workload=workload,
                 port_forwards='%d:%d' % (svc_port, svc_port),
@@ -1336,9 +1361,6 @@ if __name__ == "__main__":
                 links=svc_links,
             )
         else:
-            # Unknown type: register the workload but skip port-forward.
-            # The user can add their own k8s_resource call after suse_app()
-            # if they need a non-standard port.
             k8s_resource(
                 workload=workload,
                 labels=[labels.get(workload, 'services')],
