@@ -1111,7 +1111,11 @@ if __name__ == "__main__":
         # via cwd, and the project's chart_dir is computed relative to
         # the .rda/project.yaml location.
         render_cmd = 'rda render'
+        # Read stage from .rda/stage file (if exists), then env var override.
+        stage_file = os.path.join(chart_path, '.rda', 'stage')
         rda_stage = os.getenv('RDA_STAGE', '')
+        if not rda_stage and os.path.isfile(stage_file):
+            rda_stage = str(read_file(stage_file)).strip()
         if rda_stage:
             render_cmd = 'rda render --stage ' + rda_stage
         local(render_cmd, quiet=True, echo_off=False)
