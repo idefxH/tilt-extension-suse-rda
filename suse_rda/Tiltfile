@@ -1110,11 +1110,10 @@ if __name__ == "__main__":
         # Run from chart_path's parent: `rda render` resolves the project
         # via cwd, and the project's chart_dir is computed relative to
         # the .rda/project.yaml location.
-        # Watch .rda/stage at both project root and chart_path.
-        # rda render reads from project root (.rda/stage), but the
-        # project root is chart_path's parent.
+        # Watch .rda/stage at project root (parent of chart_path).
+        # No touch — the file must exist before tilt up. If absent,
+        # watch_file is a no-op (Tilt ignores missing paths).
         stage_path_root = os.path.join(os.path.dirname(chart_path), '.rda', 'stage')
-        local('touch %s' % stage_path_root, quiet=True, echo_off=True)
         watch_file(stage_path_root)
         local('rda render', quiet=True, echo_off=False)
         # Look for the overlay at the new path first (rda-cli v0.1.38+:
