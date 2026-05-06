@@ -1110,7 +1110,11 @@ if __name__ == "__main__":
         # Run from chart_path's parent: `rda render` resolves the project
         # via cwd, and the project's chart_dir is computed relative to
         # the .rda/project.yaml location.
-        local('rda render', quiet=True, echo_off=False)
+        render_cmd = 'rda render'
+        rda_stage = os.getenv('RDA_STAGE', '')
+        if rda_stage:
+            render_cmd = 'rda render --stage ' + rda_stage
+        local(render_cmd, quiet=True, echo_off=False)
         # Look for the overlay at the new path first (rda-cli v0.1.38+:
         # chart/.rda/values.generated.yaml), then fall back to the old
         # path (chart/values.generated.yaml) for projects that were
