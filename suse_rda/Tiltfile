@@ -1110,6 +1110,8 @@ if __name__ == "__main__":
         # Run from chart_path's parent: `rda render` resolves the project
         # via cwd, and the project's chart_dir is computed relative to
         # the .rda/project.yaml location.
+        # Watch .rda/stage so Tilt reloads when the dev switches stage.
+        watch_file(os.path.join(chart_path, '.rda', 'stage'))
         local('rda render', quiet=True, echo_off=False)
         # Look for the overlay at the new path first (rda-cli v0.1.38+:
         # chart/.rda/values.generated.yaml), then fall back to the old
