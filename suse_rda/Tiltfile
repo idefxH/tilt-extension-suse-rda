@@ -616,6 +616,8 @@ def main(library_dir, *values_files):
     # Multi-instance aliasing (#24): expand deps for types with
     # multiple bindings. Read services[] to find multi-instance types,
     # then duplicate the original dep entry with per-binding aliases.
+    # SYNC: alias formula is <type>-<binding>. Must match
+    # rda-cli/internal/render/alias.go:ComputeAliases.
     expanded_deps = list(full_deps)
     multi_aliases = {}  # type → [alias1, alias2, ...]
     for path in values_files:
@@ -658,6 +660,46 @@ def main(library_dir, *values_files):
             else:
                 new_deps.append(d)
         expanded_deps = new_deps
+
+    # Branch version patching (DO-0005 Phase 2): when a service declares
+    # branch: "16" and dsl-mappings has branches."16".chart_version, patch
+    # the dep's version: field so helm dep update pulls the correct chart.
+    dsl_path = os.path.join(library_dir, "dsl-mappings.yaml")
+    if os.path.isfile(dsl_path):
+        try:
+            with open(dsl_path) as f:
+                dsl = _yaml().safe_load(f) or {}
+        except Exception:
+            dsl = {}
+        charts_dsl = dsl.get("charts") or {}
+        branch_versions = {}  # chart_type -> chart_version from branch
+        for path in values_files:
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path) as f:
+                    data = _yaml().safe_load(f) or {}
+            except Exception:
+                continue
+            sl = data.get("suse-library")
+            if not isinstance(sl, dict):
+                continue
+            for entry in (sl.get("services") or []):
+                if not isinstance(entry, dict):
+                    continue
+                t = entry.get("type", "")
+                branch = entry.get("branch", "")
+                if t and branch and t in charts_dsl:
+                    branches = charts_dsl[t].get("branches") or {}
+                    if branch in branches:
+                        cv = branches[branch].get("chart_version", "")
+                        if cv:
+                            branch_versions[t] = cv
+        for d in expanded_deps:
+            dep_name = d.get("alias", d.get("name", ""))
+            base_type = dep_name.split("-")[0] if "-" in dep_name else dep_name
+            if base_type in branch_versions:
+                d["version"] = branch_versions[base_type]
 
     if not enabled:
         kept = []
