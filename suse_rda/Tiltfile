@@ -943,6 +943,11 @@ if __name__ == "__main__":
     )
     local(helm_dep_script, echo_off=True, quiet=False)
 
+    # Watch values.yaml so changes to branch:, enabled:, services[]
+    # trigger a Tiltfile reload → re-runs filter_enabled_deps →
+    # patches Chart.yaml → helm dep update → correct chart version.
+    watch_file(os.path.join(chart_path, 'values.yaml'))
+
     # Ignore helm-managed paths so Tilt doesn't reload-loop. helm dep update
     # writes .tgz files into charts/<sub>/charts/, plus tmpcharts-* dirs and
     # Chart.lock. Tilt watches the project tree by default; without these
