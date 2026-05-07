@@ -112,17 +112,6 @@ LANGUAGE_DEFAULTS = {
 # doesn't declare a port for the chart type (older bundles, charts
 # not in the catalog). New charts should declare their port in
 # dsl-mappings.yaml instead of adding to this dict.
-SERVICE_PORTS = {
-    'postgresql': 5432,
-    'redis': 6379,
-    'mysql': 3306,
-    'mongodb': 27017,
-    'kafka': 9092,
-    'rabbitmq': 5672,
-    'nats': 4222,
-}
-
-
 def suse_app(
         name,
         language,
@@ -155,10 +144,9 @@ def suse_app(
             the duplication rather than carry two drifting numbers). When
             values.yaml has no `suse-library.port` entry, falls back to
             the library chart's own default of 8080.
-        services (dict|None): map of service binding name -> service type. The
-            service type must be one of SERVICE_PORTS keys to get a default
-            port-forward; unknown types still get a workload entry but no
-            port-forward. Example: {'database': 'postgresql'}.
+        services (dict|None): map of service binding name -> service type.
+            Port-forwards are resolved from dsl-mappings.yaml (data-driven).
+            Example: {'database': 'postgresql'}.
             **When None (default), services are auto-discovered from
             chart_values_files** — every entry in `suse-library.services[]`
             (the unified DSL) and every chart with `suse-library.<chart>.enabled:
@@ -1436,8 +1424,6 @@ if __name__ == "__main__":
             if service_type == 'prometheus':
                 svc_links.extend(_ingress_links(_suse_lib_block(cfg, chart_alias, 'server')))
 
-        # Resolve port from dsl-mappings.yaml (data-driven), with
-        # SERVICE_PORTS as fallback for older bundles / unlisted charts.
         svc_port = 0
         chart_entry = catalogued_charts.get(service_type, {})
         chart_versions = chart_entry.get('versions', [])
@@ -1455,9 +1441,6 @@ if __name__ == "__main__":
                     for pname, pspec in svc_spec['ports'].items():
                         svc_port = pspec.get('port', 0)
                         break
-        if not svc_port and service_type in SERVICE_PORTS:
-            svc_port = SERVICE_PORTS[service_type]
-
         if svc_port:
             local_port = svc_port
             if local_port < 1024:
