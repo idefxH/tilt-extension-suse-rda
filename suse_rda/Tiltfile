@@ -688,7 +688,7 @@ def main(library_dir, *values_files):
                 if not isinstance(entry, dict):
                     continue
                 t = entry.get("type", "")
-                branch = entry.get("branch", "")
+                branch = str(entry.get("branch", ""))
                 if t and branch and t in charts_dsl:
                     branches = charts_dsl[t].get("branches") or {}
                     if branch in branches:
