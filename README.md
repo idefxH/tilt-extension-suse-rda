@@ -22,12 +22,12 @@ load('ext://suse-rda', 'suse_app')
 suse_app(
     name='my-app',
     language='nodejs',
-    port=8080,
 )
 ```
 
 That replaces ~30 lines of `docker_build` / `helm` / `k8s_resource` boilerplate
-with one call. **Service port-forwards are auto-discovered from `chart/values.yaml`** — every entry under `suse-library.services[]` with `provisioning: deploy` AND a matching `<chart>.enabled: true` gets a port-forward registered. The Tiltfile stays in lockstep with `values.yaml` automatically; you don't list services in two places.
+with one call. Port is auto-discovered from `suse-library.port` in values.yaml
+(default 8080). **Service port-forwards are auto-discovered from `chart/values.yaml`** — every entry under `suse-library.services[]` with `provisioning: deploy` AND a matching `<chart>.enabled: true` gets a port-forward registered. The Tiltfile stays in lockstep with `values.yaml` automatically; you don't list services in two places.
 
 Entries with `provisioning: connect` or `provisioning: connect` are skipped (no in-cluster workload to forward). Entries whose sub-chart is not enabled are also skipped (no workload deployed).
 
@@ -65,6 +65,31 @@ extension in a repo lives in a subdirectory named after itself.
 | `python` | `paketo-buildpacks/python` | Sync `./src`, re-run `pip install` on requirement-file changes |
 | `java` | `paketo-buildpacks/java` | Full rebuild on any change |
 | `go` | `paketo-buildpacks/go` | Full rebuild on any change |
+
+## Brownfield support
+
+For existing apps with a pre-built container image (no pack build):
+
+```python
+suse_app(
+    name='my-app',
+    chart_path='deploy',
+    image_ref='registry.corp.com/my-app:v2.3.1',
+)
+```
+
+For existing Helm chart projects (no image management at all):
+
+```python
+suse_app(
+    name='my-app',
+    chart_path='chart',
+    helm_only=True,
+)
+```
+
+When `image_ref` is set, `language` is not needed. When `helm_only` is
+True, both `language` and `image_ref` are ignored.
 
 ## Conventional service ports
 
