@@ -297,6 +297,7 @@ def suse_app(
         ref=name + ':dev',
         command=pack_cmd,
         deps=deps,
+        ignore=[chart_path],
         live_update=live_update_steps if live_update_steps else None,
     )
 
