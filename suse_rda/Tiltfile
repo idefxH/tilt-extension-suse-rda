@@ -114,7 +114,7 @@ LANGUAGE_DEFAULTS = {
 # dsl-mappings.yaml instead of adding to this dict.
 def suse_app(
         name,
-        language,
+        language=None,
         port=None,
         services=None,
         chart_path=None,
@@ -123,15 +123,18 @@ def suse_app(
         extra_buildpacks=[],
         additional_env={},
         live_update_paths=None,
-        ui_labels=None):
+        ui_labels=None,
+        image_ref=None,
+        helm_only=False):
     """Build a project image with pack, deploy its Helm chart, and surface
     convenient port-forwards for the app and any declared services.
 
     Required:
         name (str): project name. Must equal the Helm release name and the
             chart's metadata.name (so the Deployment resource name matches).
-        language (str): one of 'nodejs', 'python', 'java', 'go'. Drives the
-            default buildpacks and live-update behaviour.
+        language (str|None): one of 'nodejs', 'python', 'java', 'go'. Drives
+            the default buildpacks and live-update behaviour. Optional when
+            image_ref or helm_only is set.
 
     Common:
         port (int|None): HTTP port exposed by the app container. **Default
@@ -169,6 +172,14 @@ def suse_app(
             the chart directory). Override with paths relative to the Tiltfile
             if your project keeps values somewhere else.
 
+    Brownfield:
+        image_ref (str|None): pre-built container image (e.g.
+            'registry.corp.com/my-app:v2.3.1'). Skips pack build entirely
+            and passes image.repository + image.tag to helm.
+        helm_only (bool): when True, skip ALL image management. The user
+            provides their image through their own mechanism. Just helm
+            deploy + port-forwards.
+
     Override:
         builder_image (str): CNB builder image. Default Paketo full builder.
             Override when SUSE-AppCo buildpacks ship:
@@ -183,9 +194,10 @@ def suse_app(
         ui_labels (dict): map of resource name -> Tilt UI label. Defaults
             map the app to 'app', services to 'services'.
     """
-    if language not in LANGUAGE_DEFAULTS:
-        fail('suse_app: unsupported language %r. Supported: %s' % (
-            language, ', '.join(sorted(LANGUAGE_DEFAULTS.keys()))))
+    if not helm_only and not image_ref:
+        if language not in LANGUAGE_DEFAULTS:
+            fail('suse_app: unsupported language %r. Supported: %s' % (
+                language, ', '.join(sorted(LANGUAGE_DEFAULTS.keys()))))
 
     # Auto-detect chart_path when caller didn't pass one. Prefer deploy/
     # (bundle template 0.11.13+ scaffolds) and fall back to chart/ (older
@@ -207,110 +219,76 @@ def suse_app(
         else:
             chart_path = 'chart'
 
-    defaults = LANGUAGE_DEFAULTS[language]
-    builder = builder_image or DEFAULT_BUILDER
-    buildpacks = defaults['buildpacks'] + extra_buildpacks
-    sync_paths = live_update_paths if live_update_paths != None else defaults['live_update_paths']
     labels = ui_labels or {}
 
-    # Build pack command. Tilt's $EXPECTED_REF is substituted at build time.
-    # We tag the result as <name>:rda-cache after build so pack can
-    # reuse layers on the next build (pack looks up by image name for
-    # its ANALYZING phase). Without this, Tilt's changing tag causes
-    # pack to re-download Node.js/Go/Java on every Tiltfile reload.
-    cache_dir = '/tmp/rda-pack-cache-' + name
-    pack_args = ['pack', 'build', '$EXPECTED_REF',
-                 '--cache', '"type=build;format=bind;source=' + cache_dir + '"',
-                 '--cache', '"type=launch;format=bind;source=' + cache_dir + '-launch"',
-                 '--builder', builder]
-    for bp in buildpacks:
-        pack_args.extend(['--buildpack', bp])
-    for k, v in additional_env.items():
-        pack_args.extend(['--env', '%s=%s' % (k, v)])
-    # Per-language opt-in: select the Procfile's dev process so the CNB
-    # launcher runs e.g. 'node --watch src/index.js'. The runtime then
-    # re-execs itself on each Tilt sync without restart_container().
-    dev_proc = defaults.get('pack_default_process')
-    if dev_proc:
-        pack_args.extend(['--default-process', dev_proc])
-    # Per-language build-time env vars (e.g. NODE_ENV=development to
-    # force npm ci to include devDependencies, so dev tools like
-    # nodemon make it into the image).
-    for k, v in (defaults.get('pack_build_env') or {}).items():
-        pack_args.extend(['--env', '%s=%s' % (k, v)])
-    pack_args.extend(['--path', '.'])
-    pack_cmd = ' '.join(pack_args)
+    # ─── Image strategy: pack build / pre-built image / helm-only ───
+    if helm_only:
+        pass
+    elif image_ref:
+        # Pre-built image: parse registry/repo:tag and pass to helm.
+        # No pack build, no custom_build. Tilt just deploys the image.
+        if ':' in image_ref:
+            _img_repo, _img_tag = image_ref.rsplit(':', 1)
+        else:
+            _img_repo = image_ref
+            _img_tag = 'latest'
+    else:
+        defaults = LANGUAGE_DEFAULTS[language]
+        builder = builder_image or DEFAULT_BUILDER
+        buildpacks = defaults['buildpacks'] + extra_buildpacks
+        sync_paths = live_update_paths if live_update_paths != None else defaults['live_update_paths']
 
-    # Pre-build hook: auto-`go mod tidy` for Go projects with a go.mod
-    # but no go.sum (or whose go.sum is older than go.mod, indicating
-    # the dev added a require but never re-tidied). The heroku/go
-    # buildpack runs `go install` in module-aware strict mode, which
-    # fails with `missing go.sum entry for module providing package
-    # <pkg>` when go.sum is absent. Auto-tidying bridges:
-    #   - Existing projects scaffolded before bundle 0.11.23 ships
-    #     go.sum (the template addition that triggered this hook).
-    #   - Devs who hand-edit go.mod and forget to re-tidy.
-    # Skip silently when:
-    #   - language != 'go'
-    #   - no go.mod at the project root
-    #   - go is not on PATH (dev hasn't installed Go locally — pack
-    #     downloads its own Go inside the buildpack image, but tidy
-    #     needs a host-side go binary)
-    if language == 'go' and os.path.exists('go.mod'):
-        local(
-            "set -e; " +
-            "if ! command -v go >/dev/null 2>&1; then " +
-            "echo '[suse_rda] go not on PATH; skipping go mod tidy preflight' >&2; " +
-            "exit 0; fi; " +
-            "if [ ! -f go.sum ] || [ go.mod -nt go.sum ]; then " +
-            "echo '[suse_rda] running go mod tidy (go.sum missing or stale)'; " +
-            "go mod tidy; " +
-            "fi",
-            quiet=False, echo_off=True,
+        cache_dir = '/tmp/rda-pack-cache-' + name
+        pack_args = ['pack', 'build', '$EXPECTED_REF',
+                     '--cache', '"type=build;format=bind;source=' + cache_dir + '"',
+                     '--cache', '"type=launch;format=bind;source=' + cache_dir + '-launch"',
+                     '--builder', builder]
+        for bp in buildpacks:
+            pack_args.extend(['--buildpack', bp])
+        for k, v in additional_env.items():
+            pack_args.extend(['--env', '%s=%s' % (k, v)])
+        dev_proc = defaults.get('pack_default_process')
+        if dev_proc:
+            pack_args.extend(['--default-process', dev_proc])
+        for k, v in (defaults.get('pack_build_env') or {}).items():
+            pack_args.extend(['--env', '%s=%s' % (k, v)])
+        pack_args.extend(['--path', '.'])
+        pack_cmd = ' '.join(pack_args)
+
+        if language == 'go' and os.path.exists('go.mod'):
+            local(
+                "set -e; " +
+                "if ! command -v go >/dev/null 2>&1; then " +
+                "echo '[suse_rda] go not on PATH; skipping go mod tidy preflight' >&2; " +
+                "exit 0; fi; " +
+                "if [ ! -f go.sum ] || [ go.mod -nt go.sum ]; then " +
+                "echo '[suse_rda] running go mod tidy (go.sum missing or stale)'; " +
+                "go mod tidy; " +
+                "fi",
+                quiet=False, echo_off=True,
+            )
+
+        live_update_steps = []
+        for path in sync_paths:
+            sync_target = '/workspace/' + path.lstrip('./')
+            live_update_steps.append(sync(path, sync_target))
+        install_cmd = defaults.get('live_update_install_cmd')
+        install_trigger = defaults.get('live_update_install_trigger', [])
+        if install_cmd and install_trigger:
+            live_update_steps.append(run(install_cmd, trigger=install_trigger))
+
+        deps = sync_paths if sync_paths else ['.']
+
+        custom_build(
+            ref=name + ':dev',
+            command=pack_cmd,
+            deps=deps,
+            ignore=[chart_path, 'deploy', '.rda', 'Tiltfile'],
+            match_in_env_vars=True,
+            skips_local_docker=True,
+            disable_push=True,
+            live_update=live_update_steps if live_update_steps else None,
         )
-
-    # Live update steps. Only interpreted languages (nodejs, python) opt
-    # into live_update; compiled languages rebuild via pack on each change.
-    # The cycle is:
-    #   1. sync changed files host -> /workspace/ in the running container
-    #   2. (optional) reinstall step if its trigger fires (e.g. package.json)
-    # The container's process is launched via the Procfile's 'dev' entry
-    # (pack --default-process dev) which uses the language's native
-    # watcher (node --watch / uvicorn --reload / etc.) so no Tilt-side
-    # restart is needed. The Procfile's 'web' entry stays the production
-    # launch.
-    live_update_steps = []
-    for path in sync_paths:
-        # CNB launchers (Heroku, Paketo) lay out source at /workspace.
-        sync_target = '/workspace/' + path.lstrip('./')
-        live_update_steps.append(sync(path, sync_target))
-    install_cmd = defaults.get('live_update_install_cmd')
-    install_trigger = defaults.get('live_update_install_trigger', [])
-    if install_cmd and install_trigger:
-        live_update_steps.append(run(install_cmd, trigger=install_trigger))
-    # No restart_container() — we rely on the language's own watcher
-    # (node --watch, uvicorn --reload, ...) selected via pack_default_process
-    # in LANGUAGE_DEFAULTS. The CNB image's launcher runs the dev process
-    # which keeps an eye on /workspace/src/ and re-execs itself after each
-    # sync, sub-2s reload without Tilt's deprecated container restart.
-    # Languages whose runtime has no native watcher fall through to a
-    # custom_build rebuild on file change — slower but always correct.
-
-    # Build deps: file paths Tilt watches. Empty sync_paths means "watch the
-    # whole project" — rebuild on any change. With sync paths set, Tilt
-    # only rebuilds for changes outside those paths (e.g. Chart.yaml, Dockerfile).
-    deps = sync_paths if sync_paths else ['.']
-
-    custom_build(
-        ref=name + ':dev',
-        command=pack_cmd,
-        deps=deps,
-        ignore=[chart_path, 'deploy', '.rda', 'Tiltfile'],
-        match_in_env_vars=True,
-        skips_local_docker=True,
-        disable_push=True,
-        live_update=live_update_steps if live_update_steps else None,
-    )
 
     # Helm install. Renders the chart at chart_path with the given values
     # files, applies the resulting manifests to the cluster.
@@ -1197,11 +1175,17 @@ if __name__ == "__main__":
               'will not be regenerated. Install rda CLI to keep services[] DSL ' +
               'in sync with sub-chart values. See idefxH/rda-cli.')
 
+    helm_set = []
+    if image_ref:
+        helm_set.append('image.repository=' + _img_repo)
+        helm_set.append('image.tag=' + _img_tag)
+
     k8s_yaml(helm(
         chart_path,
         name=name,
         namespace=namespace,
         values=chart_values_files,
+        set=helm_set,
     ))
 
     # Surface the application Service on the requested port. Convention:
