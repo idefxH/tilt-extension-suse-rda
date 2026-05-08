@@ -218,9 +218,10 @@ def suse_app(
     # reuse layers on the next build (pack looks up by image name for
     # its ANALYZING phase). Without this, Tilt's changing tag causes
     # pack to re-download Node.js/Go/Java on every Tiltfile reload.
+    cache_dir = '/tmp/rda-pack-cache-' + name
     pack_args = ['pack', 'build', '$EXPECTED_REF',
-                 '--cache', 'type=build;format=bind;source=/tmp/rda-pack-cache-' + name,
-                 '--cache', 'type=launch;format=bind;source=/tmp/rda-pack-cache-' + name + '-launch',
+                 '--cache', '"type=build;format=bind;source=' + cache_dir + '"',
+                 '--cache', '"type=launch;format=bind;source=' + cache_dir + '-launch"',
                  '--builder', builder]
     for bp in buildpacks:
         pack_args.extend(['--buildpack', bp])
