@@ -214,7 +214,14 @@ def suse_app(
     labels = ui_labels or {}
 
     # Build pack command. Tilt's $EXPECTED_REF is substituted at build time.
-    pack_args = ['pack', 'build', '$EXPECTED_REF', '--builder', builder]
+    # We tag the result as <name>:rda-cache after build so pack can
+    # reuse layers on the next build (pack looks up by image name for
+    # its ANALYZING phase). Without this, Tilt's changing tag causes
+    # pack to re-download Node.js/Go/Java on every Tiltfile reload.
+    pack_args = ['pack', 'build', '$EXPECTED_REF',
+                 '--cache', 'type=build;format=bind;source=/tmp/rda-pack-cache-' + name,
+                 '--cache', 'type=launch;format=bind;source=/tmp/rda-pack-cache-' + name + '-launch',
+                 '--builder', builder]
     for bp in buildpacks:
         pack_args.extend(['--buildpack', bp])
     for k, v in additional_env.items():
