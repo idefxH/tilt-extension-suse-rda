@@ -91,6 +91,34 @@ suse_app(
 When `image_ref` is set, `language` is not needed. When `helm_only` is
 True, both `language` and `image_ref` are ignored.
 
+## `helm_rda_chart()` — helm-rda plugin integration (rda-cli v0.2.0+)
+
+Thin chart-rendering primitive that uses the `helm rda template` plugin
+when installed (one shell call: DSL projection + `helm template` with no
+intermediate `values.generated.yaml` on disk), and falls back to
+`rda render` + Tilt's `helm()` builtin when not.
+
+```python
+load('ext://suse-rda', 'helm_rda_chart')
+
+helm_rda_chart(
+    name='my-app',
+    chart_path='deploy',
+    stage='dev',
+)
+k8s_resource('my-app', port_forwards='8080:8080')
+```
+
+Unlike `suse_app(...)`, this function does NOT do pack build, helm dep
+update, namespace creation, port-forwarding, or pull-secret mirror —
+it's the chart-rendering step only. Compose with `k8s_resource()` for
+port-forwards. For the batteries-included experience, stick with
+`suse_app(...)`.
+
+Plugin detection: `helm plugin list | grep ^rda`. Missing plugin →
+fallback path with a one-line warning. Missing both plugin and `rda`
+CLI → louder warning, chart still renders without DSL projection.
+
 ## Conventional service ports
 
 For each service auto-discovered from `chart/values.yaml` (or passed

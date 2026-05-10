@@ -1527,3 +1527,122 @@ if __name__ == "__main__":
                 labels=[labels.get(workload, 'services')],
                 links=svc_links,
             )
+
+
+# ─── helm_rda_chart() — helm-rda plugin integration (rda-cli v0.2.0+) ──
+#
+# Thin chart-rendering primitive that uses the helm-rda plugin's
+# `helm rda template` (DSL projection + helm template in one shell call,
+# no values.generated.yaml on disk) when available, and falls back to
+# `rda render` + Tilt's helm() builtin when not.
+#
+# Usage in a project Tiltfile:
+#
+#   load('ext://suse-rda', 'helm_rda_chart')
+#   helm_rda_chart(name='my-app', stage='dev')
+#   k8s_resource('my-app', port_forwards='8080:8080')
+#
+# Unlike suse_app(), helm_rda_chart() does NOT do pack build, helm dep
+# update, namespace creation, port-forwarding, or pull-secret mirror —
+# it's the chart-rendering step only. Compose with k8s_resource() for
+# port-forwards. For the batteries-included experience, stick with
+# suse_app(); for projects already on rda-cli v0.2.0+ that want the
+# plugin's one-step flow without the legacy machinery, this is the hook.
+
+def _helm_rda_plugin_present():
+    """True iff `helm plugin list` reports a plugin named 'rda'."""
+    out = str(local(
+        "helm plugin list 2>/dev/null | grep -qE '^rda[[:space:]]' && " +
+        "echo yes || echo no",
+        quiet=True, echo_off=True,
+    )).strip()
+    return out == 'yes'
+
+
+def helm_rda_chart(
+        name,
+        chart_path=None,
+        stage=None,
+        values=None,
+        namespace=None,
+        set=[]):
+    """Render a Helm chart with `helm rda template` and apply the result.
+
+    Detects the helm-rda plugin (rda-cli v0.2.0+); when present, runs
+    `helm rda template` directly — DSL projection and `helm template`
+    happen in one shell call, no intermediate file on disk. When the
+    plugin is absent, falls back to running `rda render` and then
+    Tilt's helm() builtin, with a one-line warning so the dev knows to
+    install the plugin for the faster path.
+
+    Args:
+        name (str): Helm release name.
+        chart_path (str|None): path to the Helm chart relative to the
+            Tiltfile. Default: auto-detected — prefers `deploy/` (bundle
+            v0.11.13+ scaffolds), falls back to `chart/`.
+        stage (str|None): rda stage (e.g. 'dev', 'staging'). Passed to
+            `helm rda template --stage`. When None, the plugin uses its
+            own default (typically the project's current `.rda/stage`).
+        values (list[str]|None): values files passed to helm (-f).
+            Default [chart_path + '/values.yaml'].
+        namespace (str|None): target Kubernetes namespace. Default:
+            helm's default. Pass an explicit value to land the release
+            in a project-scoped namespace.
+        set (list[str]): inline value overrides (helm --set). E.g.
+            ['image.tag=v2.3.1', 'replicaCount=3'].
+    """
+    if chart_path == None:
+        if os.path.exists('deploy/Chart.yaml'):
+            chart_path = 'deploy'
+        elif os.path.exists('chart/Chart.yaml'):
+            chart_path = 'chart'
+        else:
+            chart_path = 'chart'
+
+    if values == None:
+        values = [chart_path + '/values.yaml']
+
+    if _helm_rda_plugin_present():
+        # Plugin path: one shell call. `helm rda template` does the DSL
+        # projection AND `helm template` — no values.generated.yaml on
+        # disk for Tilt to garbage-collect.
+        args = ['helm', 'rda', 'template', name, chart_path]
+        if namespace:
+            args.extend(['--namespace', namespace])
+        if stage:
+            args.extend(['--stage', stage])
+        for vfile in values:
+            args.extend(['-f', vfile])
+        for kv in set:
+            args.extend(['--set', kv])
+        k8s_yaml(local(' '.join(args), quiet=True, echo_off=True))
+        return
+
+    # Fallback: helm-rda plugin absent. Run `rda render` (writes
+    # chart/.rda/values.generated.yaml) then layer the overlay onto the
+    # user's values list before handing off to Tilt's helm() builtin.
+    rda_present = str(local(
+        'command -v rda > /dev/null 2>&1 && echo yes || echo no',
+        quiet=True, echo_off=True,
+    )).strip()
+    if rda_present == 'yes':
+        print('helm_rda_chart: helm-rda plugin not installed; falling back ' +
+              'to `rda render` + helm template. Install the plugin for the ' +
+              'one-step flow (rda-cli v0.2.0+).')
+        local('rda render', quiet=True, echo_off=False)
+        overlay = chart_path + '/.rda/values.generated.yaml'
+        if os.path.exists(overlay) and overlay not in values:
+            values = values + [overlay]
+    else:
+        print('helm_rda_chart: warning — neither the helm-rda plugin nor ' +
+              'the `rda` CLI is on PATH. The chart will render without DSL ' +
+              'projection; sub-chart values from suse-library.services[] ' +
+              'will not reach their targets. Install rda-cli v0.2.0+.')
+
+    k8s_yaml(helm(
+        chart_path,
+        name=name,
+        namespace=namespace or '',
+        values=values,
+        set=set,
+    ))

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.0] - 2026-05-10
+
+_helm-rda plugin integration (rda-cli v0.2.0+)._
+
+### Added
+
+- `helm_rda_chart(name, chart_path, stage, values, namespace, set)` — thin
+  chart-rendering primitive that uses `helm rda template` when the helm-rda
+  plugin is installed (one shell call: DSL projection + `helm template`,
+  no `values.generated.yaml` on disk), falls back to `rda render` + Tilt's
+  `helm()` builtin otherwise. Plugin detection via `helm plugin list`.
+  Composes with `k8s_resource()` for port-forwards; `suse_app()` is
+  unchanged for the batteries-included path.
+
 ## [0.4.0] - 2026-05-05
 
 _Multi-instance same-chart-type support._
@@ -33,6 +47,7 @@ _Multi-instance same-chart-type support._
 
 - Add `heroku/procfile` to Java buildpack defaults (fixes "no default process" crash)
 
+[0.5.0]: https://github.com/idefxH/tilt-extension-suse-rda/releases/tag/v0.5.0
 [0.4.0]: https://github.com/idefxH/tilt-extension-suse-rda/releases/tag/v0.4.0
 [0.3.4]: https://github.com/idefxH/tilt-extension-suse-rda/releases/tag/v0.3.4
 [0.3.3]: https://github.com/idefxH/tilt-extension-suse-rda/releases/tag/v0.3.3
