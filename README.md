@@ -25,6 +25,25 @@ suse_app(
 )
 ```
 
+### Monorepo support
+
+Use `build_path` to point at a subdirectory when the source lives in a monorepo:
+
+```python
+suse_app(
+    name='my-app',
+    language='go',
+    build_path='services/my-app',
+)
+```
+
+### Multi-container workloads
+
+When `suse-library.workloads[]` is present in `chart/values.yaml` (bundle v0.11+),
+the extension builds each workload whose `image.tag == 'dev'`, registers a
+separate `k8s_resource` per workload, and discovers ports per-workload. The
+legacy single-workload path remains the default when `workloads[]` is absent.
+
 That replaces ~30 lines of `docker_build` / `helm` / `k8s_resource` boilerplate
 with one call. Port is auto-discovered from `suse-library.port` in values.yaml
 (default 8080). **Service port-forwards are auto-discovered from `chart/values.yaml`** — every entry under `suse-library.services[]` with `provisioning: deploy` AND a matching `<chart>.enabled: true` gets a port-forward registered. The Tiltfile stays in lockstep with `values.yaml` automatically; you don't list services in two places.
