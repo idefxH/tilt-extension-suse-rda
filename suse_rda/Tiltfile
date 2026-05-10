@@ -180,6 +180,19 @@ def suse_app(
     sync_paths = live_update_paths if live_update_paths != None else defaults['live_update_paths']
     labels = ui_labels or {}
 
+    # ─── Workloads[] detection ──────────────────────────────────────────
+    # New DSL (bundle v0.11+): `suse-library.workloads[]` array in
+    # values.yaml. Each workload carries its own image, port, ingress,
+    # shape. When present, custom_build and k8s_resource iterate the
+    # array; when absent, we fall back to the legacy single-image mode
+    # so projects that haven't migrated keep working.
+    _primary_values_file = chart_path + '/values.yaml'
+    if chart_values_files != None and len(chart_values_files) > 0:
+        _primary_values_file = chart_values_files[0]
+    _early_values = read_yaml(_primary_values_file, default={})
+    _early_lib = (_early_values.get('suse-library', {}) or {})
+    _workloads = _early_lib.get('workloads') or []
+
     # Build pack command. Tilt's $EXPECTED_REF is substituted at build time.
     pack_args = ['pack', 'build', '$EXPECTED_REF', '--builder', builder]
     for bp in buildpacks:
@@ -232,12 +245,29 @@ def suse_app(
     # only rebuilds for changes outside those paths (e.g. Chart.yaml, Dockerfile).
     deps = sync_paths if sync_paths else ['.']
 
-    custom_build(
-        ref=name + ':dev',
-        command=pack_cmd,
-        deps=deps,
-        live_update=live_update_steps if live_update_steps else None,
-    )
+    if _workloads:
+        # Workloads[] mode: build each workload whose image.tag == 'dev'.
+        # Workloads pointing to a real registry image (tag != 'dev') are
+        # pre-built and don't need a local pack build.
+        for _wl in _workloads:
+            _wl_image = _wl.get('image', {}) or {}
+            if _wl_image.get('tag') != 'dev':
+                continue
+            _wl_repo = _wl_image.get('repository', name)
+            custom_build(
+                ref=_wl_repo + ':dev',
+                command=pack_cmd,
+                deps=deps,
+                live_update=live_update_steps if live_update_steps else None,
+            )
+    else:
+        # Legacy single-workload mode.
+        custom_build(
+            ref=name + ':dev',
+            command=pack_cmd,
+            deps=deps,
+            live_update=live_update_steps if live_update_steps else None,
+        )
 
     # Helm install. Renders the chart at chart_path with the given values
     # files, applies the resulting manifests to the cluster.
@@ -445,6 +475,46 @@ if __name__ == "__main__":
     if chart_values_files == None:
         chart_values_files = [chart_path + '/values.yaml']
 
+    # ─── Namespace resolution (NS Phase A) ─────────────────────────────
+    # Read `.rda/project.yaml` for the namespace template, expand the
+    # {{.project}} / {{.user}} tokens, pre-create the namespace, and pass
+    # --namespace to helm. Default `{{.project}}` for projects scaffolded
+    # before rda-cli v0.1.43 (no namespace block in project.yaml) — same
+    # default as `rda new` itself, so behaviour matches a fresh scaffold
+    # without forcing legacy projects through `rda upgrade` first.
+    #
+    # The CLI persists only the literal template string; expansion happens
+    # here so a `git clone` on a different developer's box produces a
+    # different namespace without rewriting project.yaml. Spec source of
+    # truth: rda-cli/rda.md BEHAVIOR/new (namespace_template input) and
+    # rda-docs/concepts/namespaces.md.
+    project_meta = read_yaml('.rda/project.yaml', default={})
+    ns_template = ((project_meta.get('namespace', {}) or {}).get('local', '') or '{{.project}}')
+    # $USER is set by every interactive shell on macOS / Linux / WSL.
+    # Fall back to 'default' if somehow unset (e.g. CI without USER) so
+    # the template still resolves rather than failing at helm time.
+    user_value = str(local('echo "${USER:-default}"', quiet=True, echo_off=True)).strip() or 'default'
+    namespace = ns_template
+    for token, value in [('{{.project}}', name), ('{{ .project }}', name),
+                         ('{{.user}}', user_value), ('{{ .user }}', user_value)]:
+        namespace = namespace.replace(token, value)
+    if '{{' in namespace or '}}' in namespace:
+        fail((
+            'suse_app: namespace template %r contains an unrecognised token ' +
+            'after expansion (got %r). Allowed tokens: {{.project}}, {{.user}}. ' +
+            'Edit .rda/project.yaml namespace.local to fix.'
+        ) % (ns_template, namespace))
+
+    # Pre-create the namespace idempotently. Tilt invokes `helm template`
+    # (not `helm install --create-namespace`) so the namespace must exist
+    # before k8s_yaml applies the rendered manifests. `kubectl create
+    # --dry-run=client | kubectl apply` is idempotent — succeeds whether
+    # the namespace is new or already there.
+    local(
+        'kubectl create namespace ' + namespace +
+        ' --dry-run=client -o yaml | kubectl apply -f -',
+        quiet=True, echo_off=True)
+
     # ─── DSL projection (rda render) ────────────────────────────────────
     # Helm resolves sub-chart values BEFORE templates run, so the library
     # chart's _helpers.tpl can't inject services[].auth.user.name into
@@ -515,6 +585,7 @@ if __name__ == "__main__":
     k8s_yaml(helm(
         chart_path,
         name=name,
+        namespace=namespace,
         values=chart_values_files,
     ))
 
@@ -534,33 +605,25 @@ if __name__ == "__main__":
         parsed_values.append(read_yaml(vfile, default={}))
 
     # Derive `port` from chart/values.yaml when the caller didn't pass one.
-    # The library chart's deployment.yaml renders `containerPort: {{ .Values.port }}`
-    # and the Service maps Service.targetPort to the same value, so
-    # `suse-library.port` is the canonical container port. Reading it
-    # here keeps the Tiltfile DRY: callers don't have to remember to set
-    # the same number in two places. Closes the same drift class as
-    # rda-cli#65 (single source of truth).
-    #
-    # Resolution order (last wins, matches Helm's --values stacking):
-    #   1. library chart default (8080)
-    #   2. user's chart/values.yaml suse-library.port
-    #   3. user-overridden values files
-    #   4. explicit port=NNN in suse_app(...) — fails fast on mismatch
-    discovered_port = 8080
-    for cfg in parsed_values:
-        lib = (cfg.get('suse-library', {}) or {}) if cfg else {}
-        if 'port' in lib:
-            discovered_port = lib['port']
-    if port == None:
-        port = discovered_port
-    elif port != discovered_port:
-        fail((
-            'suse_app: port=%d passed explicitly but chart/values.yaml has ' +
-            'suse-library.port=%d. The two would drift on every edit. ' +
-            'Drop the port argument from suse_app(...) — values.yaml is the ' +
-            'source of truth (see rda-docs/concepts/dsl.md). If you really ' +
-            'need to override, change values.yaml.'
-        ) % (port, discovered_port))
+    # In workloads[] mode, port is per-workload; in legacy mode, it's
+    # read from `suse-library.port`.
+    if not _workloads:
+        # Legacy single-workload port discovery.
+        discovered_port = 8080
+        for cfg in parsed_values:
+            lib = (cfg.get('suse-library', {}) or {}) if cfg else {}
+            if 'port' in lib:
+                discovered_port = lib['port']
+        if port == None:
+            port = discovered_port
+        elif port != discovered_port:
+            fail((
+                'suse_app: port=%d passed explicitly but chart/values.yaml has ' +
+                'suse-library.port=%d. The two would drift on every edit. ' +
+                'Drop the port argument from suse_app(...) — values.yaml is the ' +
+                'source of truth (see rda-docs/concepts/dsl.md). If you really ' +
+                'need to override, change values.yaml.'
+            ) % (port, discovered_port))
 
     # Auto-discover services from `suse-library.services[]` (the unified
     # DSL in bundle v0.10+). Each entry has {binding, type, provisioning}
@@ -638,11 +701,15 @@ if __name__ == "__main__":
                 services[binding] = stype
 
     def _ingress_links(block):
+        """Extract clickable ingress links from a values block."""
         ing = block.get('ingress', {}) if block else {}
-        if not ing.get('enabled'):
-            return []
+        hosts = ing.get('hosts', [])
+        if not hosts:
+            # Legacy path: ingress.enabled guard
+            if not ing.get('enabled'):
+                return []
         scheme = 'https' if ing.get('tls') else 'http'
-        return [link(scheme + '://' + host, host) for host in ing.get('hosts', [])]
+        return [link(scheme + '://' + host, host) for host in hosts]
 
     def _suse_lib_block(values_dict, *path):
         block = values_dict.get('suse-library', {}) or {}
@@ -650,16 +717,49 @@ if __name__ == "__main__":
             block = (block.get(key, {}) or {}) if hasattr(block, 'get') else {}
         return block
 
-    app_links = []
-    for cfg in parsed_values:
-        app_links.extend(_ingress_links(cfg.get('suse-library', {}) or {}))
+    if _workloads:
+        # ─── Workloads[] mode: per-workload k8s_resource ────────────────
+        # Re-read workloads from the fully-merged parsed_values so any
+        # overlay values are included.
+        _merged_workloads = []
+        for cfg in parsed_values:
+            lib = (cfg.get('suse-library', {}) or {}) if cfg else {}
+            wls = lib.get('workloads')
+            if wls:
+                _merged_workloads = wls
+        if not _merged_workloads:
+            _merged_workloads = _workloads
 
-    k8s_resource(
-        workload=name,
-        port_forwards='%d:%d' % (port, port),
-        labels=[labels.get(name, 'app')],
-        links=app_links,
-    )
+        for _wl in _merged_workloads:
+            _wl_name = _wl.get('name', 'app')
+            _wl_port = _wl.get('port')
+            _wl_links = _ingress_links(_wl)
+            _resource_name = name + '-' + _wl_name
+            if _wl_port:
+                k8s_resource(
+                    workload=_resource_name,
+                    port_forwards='%d:%d' % (_wl_port, _wl_port),
+                    labels=[labels.get(_resource_name, 'app')],
+                    links=_wl_links,
+                )
+            else:
+                k8s_resource(
+                    workload=_resource_name,
+                    labels=[labels.get(_resource_name, 'app')],
+                    links=_wl_links,
+                )
+    else:
+        # ─── Legacy single-workload mode ────────────────────────────────
+        app_links = []
+        for cfg in parsed_values:
+            app_links.extend(_ingress_links(cfg.get('suse-library', {}) or {}))
+
+        k8s_resource(
+            workload=name,
+            port_forwards='%d:%d' % (port, port),
+            labels=[labels.get(name, 'app')],
+            links=app_links,
+        )
 
     # Surface each declared service on its conventional port. The
     # workload name is NOT always <release>-<chart-name> — some AppCo
