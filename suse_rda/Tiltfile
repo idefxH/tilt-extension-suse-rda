@@ -125,7 +125,8 @@ def suse_app(
         live_update_paths=None,
         ui_labels=None,
         image_ref=None,
-        helm_only=False):
+        helm_only=False,
+        build_path='.'):
     """Build a project image with pack, deploy its Helm chart, and surface
     convenient port-forwards for the app and any declared services.
 
@@ -265,7 +266,7 @@ def suse_app(
             pack_args.extend(['--default-process', dev_proc])
         for k, v in (defaults.get('pack_build_env') or {}).items():
             pack_args.extend(['--env', '%s=%s' % (k, v)])
-        pack_args.extend(['--path', '.'])
+        pack_args.extend(['--path', build_path])
         pack_cmd = ' '.join(pack_args)
 
         if language == 'go' and os.path.exists('go.mod'):
