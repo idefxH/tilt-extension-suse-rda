@@ -74,7 +74,7 @@ LANGUAGE_DEFAULTS = {
         'pack_build_env': {'NODE_ENV': 'development'},
     },
     'python': {
-        'buildpacks': ['heroku/python'],
+        'buildpacks': ['heroku/python', 'heroku/procfile'],
         'live_update_paths': ['./src'],
         'live_update_install_trigger': ['./requirements.txt', './pyproject.toml', './Pipfile'],
         'live_update_install_cmd': 'cd /workspace && pip install -r requirements.txt 2>/dev/null || true',
