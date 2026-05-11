@@ -303,7 +303,7 @@ def suse_app(
                     continue
                 _wl_repo = _wl_image.get('repository', name)
                 custom_build(
-                    ref=_wl_repo + ':dev',
+                    ref=_wl_repo,
                     command=pack_cmd,
                     deps=deps,
                     ignore=[chart_path, 'deploy', '.rda', 'Tiltfile'],
@@ -314,7 +314,7 @@ def suse_app(
         else:
             # Legacy single-workload mode.
             custom_build(
-                ref=name + ':dev',
+                ref=name,
                 command=pack_cmd,
                 deps=deps,
                 ignore=[chart_path, 'deploy', '.rda', 'Tiltfile'],
