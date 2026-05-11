@@ -1373,6 +1373,8 @@ if __name__ == "__main__":
                 continue
             if not host:
                 continue
+            if '{{' in host:
+                continue
             out.append(link(scheme + '://' + host, host))
         return out
 
