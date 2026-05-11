@@ -1349,20 +1349,21 @@ if __name__ == "__main__":
             if stype:
                 services[binding] = stype
 
+    # Resolve {{.domain}} from the project's suse-library.domain value.
+    _domain_value = ''
+    for _cfg in parsed_values:
+        _dl = (_cfg.get('suse-library', {}) or {}) if _cfg else {}
+        if 'domain' in _dl:
+            _domain_value = _dl['domain']
+
     def _ingress_links(block):
         """Extract clickable ingress links from a values block."""
         ing = block.get('ingress', {}) if block else {}
         hosts = ing.get('hosts', [])
         if not hosts:
-            # Legacy/services path: ingress.enabled guard
             if not ing.get('enabled'):
                 return []
         scheme = 'https' if ing.get('tls') else 'http'
-        # Two ingress.hosts shapes in the wild:
-        #   - simple list of strings: ["app.localtest.me"]   (grafana,
-        #     prometheus, the app-level ingress block)
-        #   - rich list of objects:   [{host: "...", paths: [...]}]
-        #     (dex chart 0.24+, others that need per-host path matching)
         out = []
         for h in hosts:
             if type(h) == "string":
@@ -1373,6 +1374,8 @@ if __name__ == "__main__":
                 continue
             if not host:
                 continue
+            if '{{.domain}}' in host and _domain_value:
+                host = host.replace('{{.domain}}', _domain_value)
             if '{{' in host:
                 continue
             out.append(link(scheme + '://' + host, host))
