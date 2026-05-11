@@ -307,7 +307,7 @@ def suse_app(
                     command=pack_cmd,
                     deps=deps,
                     ignore=[chart_path, 'deploy', '.rda', 'Tiltfile'],
-                    skips_local_docker=True,
+                    skips_local_docker=False,
                     disable_push=True,
                     live_update=live_update_steps if live_update_steps else None,
                 )
@@ -318,8 +318,7 @@ def suse_app(
                 command=pack_cmd,
                 deps=deps,
                 ignore=[chart_path, 'deploy', '.rda', 'Tiltfile'],
-                match_in_env_vars=True,
-                skips_local_docker=True,
+                skips_local_docker=False,
                 disable_push=True,
                 live_update=live_update_steps if live_update_steps else None,
             )
@@ -1405,11 +1404,15 @@ if __name__ == "__main__":
             _wl_links = _ingress_links(_wl)
             _resource_name = name + '-' + _wl_name
             if _wl_port:
+                # Forward local <port> to Service port 80 (the Service
+                # maps 80 → containerPort). Avoids duplicates with
+                # Tilt's auto-discovery of Service ports.
                 k8s_resource(
                     workload=_resource_name,
-                    port_forwards='%d:%d' % (_wl_port, _wl_port),
+                    port_forwards='%d:80' % (_wl_port,),
                     labels=[labels.get(_resource_name, 'app')],
                     links=_wl_links,
+                    auto_init=True,
                 )
             else:
                 k8s_resource(
