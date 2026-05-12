@@ -220,6 +220,20 @@ def suse_app(
         else:
             chart_path = 'chart'
 
+    # ─── Stage auto-detection ──────────────────────────────────────────
+    # Resolve the RDA stage once, used by every `rda render --stage`
+    # call below. Priority:
+    #   1. RDA_STAGE env var (explicit override, e.g. CI).
+    #   2. .rda/stage file at the project root (written by `rda stage`).
+    #   3. Fallback to 'dev' (safe default for inner-loop).
+    _stage = os.getenv('RDA_STAGE', '')
+    if not _stage:
+        _stage_file = os.path.join(chart_path, '..', '.rda', 'stage')
+        if os.path.exists(_stage_file):
+            _stage = str(read_file(_stage_file)).strip()
+    if not _stage:
+        _stage = 'dev'
+
     labels = ui_labels or {}
 
     # ─── Workloads[] detection ──────────────────────────────────────────
@@ -1174,7 +1188,7 @@ if __name__ == "__main__":
         # watch_file is a no-op (Tilt ignores missing paths).
         stage_path_root = os.path.join(os.path.dirname(chart_path), '.rda', 'stage')
         watch_file(stage_path_root)
-        local('rda render --stage dev', quiet=True, echo_off=False)
+        local('rda render --stage %s' % _stage, quiet=True, echo_off=False)
         # Look for the overlay at the new path first (rda-cli v0.1.38+:
         # chart/.rda/values.generated.yaml), then fall back to the old
         # path (chart/values.generated.yaml) for projects that were
@@ -1610,6 +1624,17 @@ def helm_rda_chart(
     if values == None:
         values = [chart_path + '/values.yaml']
 
+    # Stage auto-detection for the fallback path (same logic as suse_app).
+    if stage == None:
+        _fb_stage = os.getenv('RDA_STAGE', '')
+        if not _fb_stage:
+            _fb_stage_file = os.path.join(chart_path, '..', '.rda', 'stage')
+            if os.path.exists(_fb_stage_file):
+                _fb_stage = str(read_file(_fb_stage_file)).strip()
+        if not _fb_stage:
+            _fb_stage = 'dev'
+        stage = _fb_stage
+
     if _helm_rda_plugin_present():
         # Plugin path: one shell call. `helm rda template` does the DSL
         # projection AND `helm template` — no values.generated.yaml on
@@ -1637,7 +1662,7 @@ def helm_rda_chart(
         print('helm_rda_chart: helm-rda plugin not installed; falling back ' +
               'to `rda render` + helm template. Install the plugin for the ' +
               'one-step flow (rda-cli v0.2.0+).')
-        local('rda render --stage dev', quiet=True, echo_off=False)
+        local('rda render --stage %s' % stage, quiet=True, echo_off=False)
         overlay = chart_path + '/.rda/values.generated.yaml'
         if os.path.exists(overlay) and overlay not in values:
             values = values + [overlay]
