@@ -1174,7 +1174,7 @@ if __name__ == "__main__":
         # watch_file is a no-op (Tilt ignores missing paths).
         stage_path_root = os.path.join(os.path.dirname(chart_path), '.rda', 'stage')
         watch_file(stage_path_root)
-        local('rda render', quiet=True, echo_off=False)
+        local('rda render --stage dev', quiet=True, echo_off=False)
         # Look for the overlay at the new path first (rda-cli v0.1.38+:
         # chart/.rda/values.generated.yaml), then fall back to the old
         # path (chart/values.generated.yaml) for projects that were
@@ -1637,7 +1637,7 @@ def helm_rda_chart(
         print('helm_rda_chart: helm-rda plugin not installed; falling back ' +
               'to `rda render` + helm template. Install the plugin for the ' +
               'one-step flow (rda-cli v0.2.0+).')
-        local('rda render', quiet=True, echo_off=False)
+        local('rda render --stage dev', quiet=True, echo_off=False)
         overlay = chart_path + '/.rda/values.generated.yaml'
         if os.path.exists(overlay) and overlay not in values:
             values = values + [overlay]
