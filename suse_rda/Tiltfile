@@ -727,6 +727,7 @@ re-enabling a previously-disabled chart still works.
 Idempotent. Outputs one line per kept dep + the full count.
 """
 import os
+import re
 import shutil
 import sys
 
@@ -966,6 +967,86 @@ def main(library_dir, *values_files):
             if base_type in branch_versions:
                 d["version"] = branch_versions[base_type]
 
+    # Per-service source rewriting (DO-0012): services[] can override
+    # the project source with a per-service `source:` field. Read each
+    # service's source, look up the target source in dsl-mappings, and
+    # rewrite the dep's repo/name/version accordingly.
+    if charts_dsl:
+        service_sources = {}  # chart_type -> source
+        project_source = ""
+        project_dir = os.path.dirname(library_dir)
+        project_root = os.path.dirname(project_dir)
+        project_yaml = os.path.join(project_root, ".rda", "project.yaml")
+        if os.path.isfile(project_yaml):
+            try:
+                with open(project_yaml) as f:
+                    proj_meta = _yaml().safe_load(f) or {}
+                project_source = proj_meta.get("chart_source", "")
+            except Exception:
+                pass
+        for path in values_files:
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path) as f:
+                    data = _yaml().safe_load(f) or {}
+            except Exception:
+                continue
+            sl = data.get("suse-library")
+            if not isinstance(sl, dict):
+                continue
+            for entry in (sl.get("services") or []):
+                if not isinstance(entry, dict):
+                    continue
+                t = entry.get("type", "")
+                svc_source = entry.get("source", "")
+                if t and svc_source:
+                    service_sources[t] = svc_source
+
+        for d in expanded_deps:
+            dep_alias = d.get("alias", "")
+            dep_name = d.get("name", "")
+            chart_type = dep_alias or dep_name
+            # infra deps (e.g. cloudnative-pg operator) follow the source
+            # of their parent DSL type (cnpg). Check infra_only flag.
+            chart_entry_meta = charts_dsl.get(chart_type, {})
+            parent_type = chart_type
+            if chart_entry_meta.get("infra_only"):
+                # Find DSL type that enables this infra dep via chart_defaults
+                for svc_t, svc_src in service_sources.items():
+                    svc_entry = charts_dsl.get(svc_t, {})
+                    for ver in (svc_entry.get("versions") or []):
+                        defaults = ver.get("chart_defaults") or {}
+                        if any(chart_type in str(k) for k in defaults):
+                            parent_type = svc_t
+                            break
+            svc_source = service_sources.get(parent_type, project_source)
+            if not svc_source:
+                continue
+            chart_entry = charts_dsl.get(chart_type, {})
+            sources = chart_entry.get("sources", {})
+            target_src = sources.get(svc_source, {})
+            if not target_src:
+                continue
+            target_repo = target_src.get("chart_ref", "")
+            target_name = target_src.get("chart_name", "")
+            if not target_repo:
+                continue
+            if d.get("repository", "") != target_repo:
+                d["repository"] = target_repo
+            if target_name and dep_name != target_name:
+                d["name"] = target_name
+                if not dep_alias:
+                    d["alias"] = chart_type
+            elif not target_name and dep_alias and dep_name != chart_type:
+                d["name"] = chart_type
+                d.pop("alias", None)
+            if svc_source == "community":
+                ver = d.get("version", "")
+                base = re.sub(r'-\d+\.\d+$', '', ver)
+                if base != ver:
+                    d["version"] = base
+
     if not enabled:
         kept = []
     else:
@@ -991,6 +1072,16 @@ def main(library_dir, *values_files):
     if wrote:
         with open(chart_yaml, "w") as f:
             f.write(new_content)
+        # When repos changed (source switch), delete stale .tgz files
+        # and Chart.lock to force helm dep update to re-pull.
+        charts_subdir = os.path.join(library_dir, "charts")
+        if os.path.isdir(charts_subdir):
+            for tgz in os.listdir(charts_subdir):
+                if tgz.endswith(".tgz"):
+                    os.remove(os.path.join(charts_subdir, tgz))
+        lock = os.path.join(library_dir, "Chart.lock")
+        if os.path.isfile(lock):
+            os.remove(lock)
 
     skipped = len(full_deps) - len(kept)
     suffix = "" if wrote else " (unchanged on disk)"
@@ -1467,9 +1558,9 @@ if __name__ == "__main__":
         if 'domain' in _dl:
             _domain_value = _dl['domain']
 
-    def _ingress_links(block):
+    def _ingress_links(block, ingress_key='ingress'):
         """Extract clickable ingress links from a values block."""
-        ing = block.get('ingress', {}) if block else {}
+        ing = block.get(ingress_key, {}) if block else {}
         hosts = ing.get('hosts', [])
         if not hosts:
             if not ing.get('enabled'):
@@ -1620,6 +1711,21 @@ if __name__ == "__main__":
         else:
             aliases[binding_name] = service_type + '-' + binding_name
 
+    # Register CRD kinds for operator-managed charts so Tilt
+    # recognises them as claimable objects in k8s_resource(objects=...).
+    _registered_kinds = {}
+    for _stype in services.values():
+        _ce = catalogued_charts.get(_stype, {})
+        _cvs = _ce.get('versions', [])
+        if _cvs and _cvs[0].get('operator_managed'):
+            _cr_kind_info = _cvs[0].get('cr_kind', {})
+            if _cr_kind_info:
+                _kind_key = _cr_kind_info.get('kind', '')
+                _api_ver = _cr_kind_info.get('api_version', '')
+                if _kind_key and _kind_key not in _registered_kinds:
+                    k8s_kind(_kind_key, api_version=_api_ver, pod_readiness='wait')
+                    _registered_kinds[_kind_key] = True
+
     used_local_ports = {}
     for binding_name, service_type in services.items():
         chart_alias = aliases[binding_name]
@@ -1627,18 +1733,42 @@ if __name__ == "__main__":
 
         # Sub-chart ingress lookup. Use chart_alias for values lookup
         # (multi-instance values are keyed by alias, not bare type).
-        svc_links = []
-        for cfg in parsed_values:
-            svc_links.extend(_ingress_links(_suse_lib_block(cfg, chart_alias)))
-            if service_type == 'prometheus':
-                svc_links.extend(_ingress_links(_suse_lib_block(cfg, chart_alias, 'server')))
-
         svc_port = 0
         chart_entry = catalogued_charts.get(service_type, {})
         chart_versions = chart_entry.get('versions', [])
+
+        # Derive ingress_path from values_mapping['ingress.enabled'].
+        # e.g. 'minio.consoleIngress.enabled' -> ['consoleIngress']
+        #      'prometheus.server.ingress.enabled' -> ['server', 'ingress']
+        #      'grafana.ingress.enabled' -> ['ingress']
+        # Segments: drop first (chart name) and last ('enabled') to get path within chart block.
+        _ingress_vm = (chart_versions[0].get('values_mapping', {}) or {}).get('ingress.enabled', '') if chart_versions else ''
+        if _ingress_vm:
+            _segs = _ingress_vm.split('.')
+            ingress_path = _segs[1:-1] if len(_segs) > 2 else ['ingress']
+        else:
+            ingress_path = ['ingress']
+        svc_links = []
+        for cfg in parsed_values:
+            parent = _suse_lib_block(cfg, chart_alias, *ingress_path[:-1])
+            svc_links.extend(_ingress_links(parent, ingress_path[-1]))
+        is_operator_managed = False
+        pod_selector = {}
+        cr_object = ''
+        operator_resource = ''
         if chart_versions:
             svc_spec = chart_versions[0].get('service', {})
             svc_port = svc_spec.get('port', 0)
+            is_operator_managed = chart_versions[0].get('operator_managed', False)
+            raw_selector = chart_versions[0].get('pod_selector', {})
+            for sel_k, sel_v in raw_selector.items():
+                pod_selector[sel_k] = sel_v.replace('{{ .Release.Name }}', name).replace('{{.Release.Name}}', name)
+            raw_cr = chart_versions[0].get('cr_object', '')
+            if raw_cr:
+                cr_object = raw_cr.replace('{{ .Release.Name }}', name).replace('{{.Release.Name}}', name)
+            raw_op = chart_versions[0].get('operator_resource', '')
+            if raw_op:
+                operator_resource = raw_op.replace('{{ .Release.Name }}', name).replace('{{.Release.Name}}', name)
             # Multi-port: find the primary port
             if not svc_port and svc_spec.get('ports'):
                 for pname, pspec in svc_spec['ports'].items():
@@ -1650,7 +1780,33 @@ if __name__ == "__main__":
                     for pname, pspec in svc_spec['ports'].items():
                         svc_port = pspec.get('port', 0)
                         break
-        if svc_port:
+
+        if is_operator_managed and cr_object:
+            # Operator-managed charts (e.g. CNPG): k8s_kind() registered
+            # the CRD kind above, so Tilt auto-discovers the CR as a
+            # workload. Rename it to the DSL workload name and attach
+            # operator-created pods via label selectors.
+            cr_name = cr_object.split(':')[0]
+            resource_kwargs = {
+                'workload': cr_name,
+                'new_name': workload,
+                'labels': [labels.get(workload, 'services')],
+                'links': svc_links,
+            }
+            if pod_selector:
+                resource_kwargs['extra_pod_selectors'] = [pod_selector]
+            if operator_resource:
+                resource_kwargs['resource_deps'] = [operator_resource]
+            if svc_port:
+                local_port = svc_port
+                if local_port < 1024:
+                    local_port = svc_port + 10000
+                while local_port in used_local_ports:
+                    local_port += 1
+                used_local_ports[local_port] = True
+                resource_kwargs['port_forwards'] = '%d:%d' % (local_port, svc_port)
+            k8s_resource(**resource_kwargs)
+        elif svc_port:
             local_port = svc_port
             if local_port < 1024:
                 local_port = svc_port + 10000
