@@ -235,6 +235,158 @@ def suse_app(
 
     labels = ui_labels or {}
 
+    # ─── Namespace + pullsecret mirror (must run EARLY) ─────────────────
+    # Resolve the deploy namespace, ensure it exists, and mirror the
+    # application-collection imagePullSecret BEFORE any image builds are
+    # registered or `helm dep update` work begins. Two reasons:
+    #
+    #   1. Race window: registering custom_build / k8s_yaml later in this
+    #      function queues those for Tilt's reconciler. Pods that pull
+    #      from dp.apps.rancher.io land on ImagePullBackOff if the secret
+    #      isn't already in the target NS the moment kubelet first sees
+    #      the pod spec. With this block at the bottom of the function,
+    #      slow `helm dep update` runs left a window where pods could be
+    #      scheduled before kubectl finished the mirror. The e2e harness
+    #      worked around this by pre-creating namespaces (and the secret)
+    #      itself — that workaround can go away now that the mirror runs
+    #      before any workload registration in this function.
+    #
+    #   2. Same `local()` calls, same logic — only the position moved.
+    #      Functionally identical for the single-NS case; the win is the
+    #      ordering guarantee versus image-build / k8s_yaml registration
+    #      below.
+    #
+    # Namespace expansion: shell out to `rda namespace expand` (single
+    # source of truth, rda-cli 0.1.47+), with a Starlark fallback for
+    # older rda binaries. Reads `.rda/project.yaml` namespace.local,
+    # substitutes {{.project}} / {{.user}}.
+    rda_can_expand = str(local(
+        'command -v rda > /dev/null 2>&1 && rda namespace --help > /dev/null 2>&1 && echo yes || echo no',
+        quiet=True, echo_off=True)).strip()
+    if rda_can_expand == 'yes':
+        namespace = str(local('rda namespace expand', quiet=True, echo_off=True)).strip()
+        if not namespace:
+            fail('suse_app: `rda namespace expand` returned empty output. Check `.rda/project.yaml`.')
+    else:
+        # Legacy fallback: in-Tiltfile expander (kept simple — covers UC1
+        # and UC2 patterns; for richer cases the user should upgrade to
+        # rda-cli 0.1.47+ which owns the canonical logic).
+        project_meta = read_yaml('.rda/project.yaml', default={})
+        ns_template = ((project_meta.get('namespace', {}) or {}).get('local', '') or '{{.project}}')
+        user_value = str(local('echo "${USER:-default}"', quiet=True, echo_off=True)).strip() or 'default'
+        namespace = ns_template
+        for token, value in [('{{.project}}', name), ('{{ .project }}', name),
+                             ('{{.user}}', user_value), ('{{ .user }}', user_value)]:
+            namespace = namespace.replace(token, value)
+        if '{{' in namespace or '}}' in namespace:
+            fail((
+                'suse_app: namespace template %r contains an unrecognised token ' +
+                'after expansion (got %r). Allowed tokens: {{.project}}, {{.user}}. ' +
+                'Edit .rda/project.yaml namespace.local to fix, or install rda 0.1.47+ ' +
+                'so this extension can shell out to `rda namespace expand` instead.'
+            ) % (ns_template, namespace))
+
+    # Pre-create the namespace idempotently. Tilt invokes `helm template`
+    # (not `helm install --create-namespace`) so the namespace must exist
+    # before k8s_yaml applies the rendered manifests. `kubectl create
+    # --dry-run=client | kubectl apply` is idempotent — succeeds whether
+    # the namespace is new or already there.
+    local(
+        'kubectl create namespace ' + namespace +
+        ' --dry-run=client -o yaml | kubectl apply -f -',
+        quiet=True, echo_off=True)
+
+    # Mirror the application-collection imagePullSecret from `default` to
+    # the deploy namespace if it's missing. Background:
+    #   - The Application Collection Rancher Desktop extension installs
+    #     the Secret in `default` only. With NS Phase A (rda 0.1.43+),
+    #     every project deploys to its own namespace (`{{.project}}` or
+    #     a multi-dev `{{.project}}-{{.user}}` template), so the Secret
+    #     is never automatically present where it's needed.
+    #   - The pod's spec carries `imagePullSecrets: [application-collection]`
+    #     unconditionally. Without the Secret in NS, kubelet logs
+    #     `Unable to retrieve some image pull secrets`. App image pulls
+    #     from dp.apps.rancher.io (BCI base, AppCo subchart images) all
+    #     fail with ImagePullBackOff — locally Tilt can mask this by
+    #     building images itself, but any real subchart pull cracks open.
+    #
+    # Strategy:
+    #   1. If the target NS already has the Secret → skip silently.
+    #   2. Else if `default` has it → kubectl get -o yaml | sed | apply.
+    #      Strips namespace + cluster-bound metadata so apply lands in
+    #      the new ns. Idempotent (apply, not create).
+    #   3. Else loud failure with the remediation hint pointing at
+    #      `helm registry login` + the AppCo extension docs.
+    #
+    # Three escape hatches to coexist with operator-managed distribution
+    # (kubernetes-reflector / External Secrets / GitOps / manual):
+    #
+    #   1. Env var SUSE_RDA_SKIP_PULLSECRET_MIRROR=1 (cluster-wide).
+    #   2. Namespace label rda.suse.com/pullsecret-managed-by=operator
+    #      — set this on a project NS to declare "an operator owns the
+    #      pullsecret here, hands off". Per-NS, persistent in YAML.
+    #   3. Source-side annotation: if Secret/application-collection in
+    #      `default` carries `external-secrets.io/owned-by` or
+    #      `reflector.v1.k8s.emberstack.com/reflection-allowed=true` we
+    #      take that as proof an operator distributes it and we step
+    #      back — letting the operator's controller reconcile in its
+    #      own time on the project NS.
+    #
+    # Step 0 (target-NS already has it) is the universal safety net:
+    # whatever distribution mechanism wrote it first, we don't touch.
+    if os.getenv('SUSE_RDA_SKIP_PULLSECRET_MIRROR', '') != '1':
+        local(
+            "set -e; " +
+            # Step 0: target NS already has the Secret — done.
+            "if kubectl get secret -n " + namespace + " application-collection " +
+            ">/dev/null 2>&1; then exit 0; fi; " +
+            # Step 0b: target NS is operator-managed via label.
+            "if [ \"$(kubectl get ns " + namespace + " -o " +
+            "jsonpath='{.metadata.labels.rda\\.suse\\.com/pullsecret-managed-by}' " +
+            "2>/dev/null)\" = 'operator' ]; then " +
+            "echo '[suse_rda] skipping pullsecret mirror " +
+            "(ns " + namespace + " labelled rda.suse.com/pullsecret-managed-by=operator)'; " +
+            "exit 0; fi; " +
+            # Step 0c: source Secret is operator-managed (ESO / reflector).
+            # Don't fight the operator — step back and let its controller
+            # propagate to the project NS on its own.
+            "if [ -n \"$(kubectl get secret -n default application-collection -o " +
+            "jsonpath='{.metadata.annotations.external-secrets\\.io/owned-by}' " +
+            "2>/dev/null)\" ]; then " +
+            "echo '[suse_rda] skipping pullsecret mirror " +
+            "(default Secret has external-secrets.io annotation; ESO will distribute)'; " +
+            "exit 0; fi; " +
+            "if [ \"$(kubectl get secret -n default application-collection -o " +
+            "jsonpath='{.metadata.annotations.reflector\\.v1\\.k8s\\.emberstack\\.com/reflection-allowed}' " +
+            "2>/dev/null)\" = 'true' ]; then " +
+            "echo '[suse_rda] skipping pullsecret mirror " +
+            "(default Secret has reflector annotation; kubernetes-reflector will distribute)'; " +
+            "exit 0; fi; " +
+            # Step 1: source missing — loud fail.
+            "if ! kubectl get secret -n default application-collection " +
+            ">/dev/null 2>&1; then " +
+            "echo '[suse_rda] FATAL: Secret/application-collection not found " +
+            "in `default` (the AppCo Rancher Desktop extension would normally " +
+            "install it there). Either install/launch the AppCo extension, " +
+            "OR run `helm registry login dp.apps.rancher.io` then bootstrap " +
+            "the Secret manually via kubectl create secret docker-registry; " +
+            "OR set SUSE_RDA_SKIP_PULLSECRET_MIRROR=1 if your cluster uses " +
+            "kubernetes-reflector / External Secrets to distribute it.' >&2; " +
+            "exit 1; fi; " +
+            # sed strips instance-bound metadata (namespace + uid +
+            # resourceVersion + creationTimestamp) so the doc is
+            # namespace-portable. kubectl apply -n <target> then anchors
+            # it to the deploy NS. No jq dep — macOS doesn't ship one.
+            "kubectl get secret -n default application-collection -o yaml | " +
+            "sed -e '/^  namespace:/d' " +
+            "-e '/^  uid:/d' " +
+            "-e '/^  resourceVersion:/d' " +
+            "-e '/^  creationTimestamp:/d' | " +
+            "kubectl apply -n " + namespace + " -f - >/dev/null && " +
+            "echo '[suse_rda] mirrored Secret/application-collection " +
+            "default -> " + namespace + "'",
+            quiet=False, echo_off=True)
+
     # ─── Workloads[] detection ──────────────────────────────────────────
     # New DSL (bundle v0.11+): `suse-library.workloads[]` array in
     # values.yaml. Each workload carries its own image, port, ingress,
@@ -1009,147 +1161,6 @@ if __name__ == "__main__":
     # Users overriding chart_values_files pass paths relative to the Tiltfile.
     if chart_values_files == None:
         chart_values_files = [chart_path + '/values.yaml']
-
-    # ─── Namespace resolution (NS Phase A + 0.1.47 single-source-of-truth) ──
-    # Shell out to `rda namespace expand` which reads `.rda/project.yaml`
-    # under namespace.local, substitutes {{.project}} / {{.user}}, and
-    # prints the resolved namespace on stdout. Single source of truth from
-    # rda-cli 0.1.47+: the previous Starlark expansion that lived inline
-    # here is gone, replaced by this one shell-out. Drift between the
-    # CLI's expander and ours is no longer possible because there's only
-    # one expander now.
-    #
-    # Fallback path: when `rda` isn't on PATH (older bundle / fresh
-    # checkout before `go install`), or when the project predates
-    # rda-cli's 0.1.47, we fall back to a tiny Starlark expander that
-    # handles the common case ({{.project}} default, {{.user}} from
-    # $USER). Same shape as before; just no longer the canonical one.
-    rda_can_expand = str(local(
-        'command -v rda > /dev/null 2>&1 && rda namespace --help > /dev/null 2>&1 && echo yes || echo no',
-        quiet=True, echo_off=True)).strip()
-    if rda_can_expand == 'yes':
-        namespace = str(local('rda namespace expand', quiet=True, echo_off=True)).strip()
-        if not namespace:
-            fail('suse_app: `rda namespace expand` returned empty output. Check `.rda/project.yaml`.')
-    else:
-        # Legacy fallback: in-Tiltfile expander (kept simple — covers UC1
-        # and UC2 patterns; for richer cases the user should upgrade to
-        # rda-cli 0.1.47+ which owns the canonical logic).
-        project_meta = read_yaml('.rda/project.yaml', default={})
-        ns_template = ((project_meta.get('namespace', {}) or {}).get('local', '') or '{{.project}}')
-        user_value = str(local('echo "${USER:-default}"', quiet=True, echo_off=True)).strip() or 'default'
-        namespace = ns_template
-        for token, value in [('{{.project}}', name), ('{{ .project }}', name),
-                             ('{{.user}}', user_value), ('{{ .user }}', user_value)]:
-            namespace = namespace.replace(token, value)
-        if '{{' in namespace or '}}' in namespace:
-            fail((
-                'suse_app: namespace template %r contains an unrecognised token ' +
-                'after expansion (got %r). Allowed tokens: {{.project}}, {{.user}}. ' +
-                'Edit .rda/project.yaml namespace.local to fix, or install rda 0.1.47+ ' +
-                'so this extension can shell out to `rda namespace expand` instead.'
-            ) % (ns_template, namespace))
-
-    # Pre-create the namespace idempotently. Tilt invokes `helm template`
-    # (not `helm install --create-namespace`) so the namespace must exist
-    # before k8s_yaml applies the rendered manifests. `kubectl create
-    # --dry-run=client | kubectl apply` is idempotent — succeeds whether
-    # the namespace is new or already there.
-    local(
-        'kubectl create namespace ' + namespace +
-        ' --dry-run=client -o yaml | kubectl apply -f -',
-        quiet=True, echo_off=True)
-
-    # Mirror the application-collection imagePullSecret from `default` to
-    # the deploy namespace if it's missing. Background:
-    #   - The Application Collection Rancher Desktop extension installs
-    #     the Secret in `default` only. With NS Phase A (rda 0.1.43+),
-    #     every project deploys to its own namespace (`{{.project}}` or
-    #     a multi-dev `{{.project}}-{{.user}}` template), so the Secret
-    #     is never automatically present where it's needed.
-    #   - The pod's spec carries `imagePullSecrets: [application-collection]`
-    #     unconditionally. Without the Secret in NS, kubelet logs
-    #     `Unable to retrieve some image pull secrets`. App image pulls
-    #     from dp.apps.rancher.io (BCI base, AppCo subchart images) all
-    #     fail with ImagePullBackOff — locally Tilt can mask this by
-    #     building images itself, but any real subchart pull cracks open.
-    #
-    # Strategy:
-    #   1. If the target NS already has the Secret → skip silently.
-    #   2. Else if `default` has it → kubectl get -o yaml | sed | apply.
-    #      Strips namespace + cluster-bound metadata so apply lands in
-    #      the new ns. Idempotent (apply, not create).
-    #   3. Else loud failure with the remediation hint pointing at
-    #      `helm registry login` + the AppCo extension docs.
-    #
-    # Three escape hatches to coexist with operator-managed distribution
-    # (kubernetes-reflector / External Secrets / GitOps / manual):
-    #
-    #   1. Env var SUSE_RDA_SKIP_PULLSECRET_MIRROR=1 (cluster-wide).
-    #   2. Namespace label rda.suse.com/pullsecret-managed-by=operator
-    #      — set this on a project NS to declare "an operator owns the
-    #      pullsecret here, hands off". Per-NS, persistent in YAML.
-    #   3. Source-side annotation: if Secret/application-collection in
-    #      `default` carries `external-secrets.io/owned-by` or
-    #      `reflector.v1.k8s.emberstack.com/reflection-allowed=true` we
-    #      take that as proof an operator distributes it and we step
-    #      back — letting the operator's controller reconcile in its
-    #      own time on the project NS.
-    #
-    # Step 0 (target-NS already has it) is the universal safety net:
-    # whatever distribution mechanism wrote it first, we don't touch.
-    if os.getenv('SUSE_RDA_SKIP_PULLSECRET_MIRROR', '') != '1':
-        local(
-            "set -e; " +
-            # Step 0: target NS already has the Secret — done.
-            "if kubectl get secret -n " + namespace + " application-collection " +
-            ">/dev/null 2>&1; then exit 0; fi; " +
-            # Step 0b: target NS is operator-managed via label.
-            "if [ \"$(kubectl get ns " + namespace + " -o " +
-            "jsonpath='{.metadata.labels.rda\\.suse\\.com/pullsecret-managed-by}' " +
-            "2>/dev/null)\" = 'operator' ]; then " +
-            "echo '[suse_rda] skipping pullsecret mirror " +
-            "(ns " + namespace + " labelled rda.suse.com/pullsecret-managed-by=operator)'; " +
-            "exit 0; fi; " +
-            # Step 0c: source Secret is operator-managed (ESO / reflector).
-            # Don't fight the operator — step back and let its controller
-            # propagate to the project NS on its own.
-            "if [ -n \"$(kubectl get secret -n default application-collection -o " +
-            "jsonpath='{.metadata.annotations.external-secrets\\.io/owned-by}' " +
-            "2>/dev/null)\" ]; then " +
-            "echo '[suse_rda] skipping pullsecret mirror " +
-            "(default Secret has external-secrets.io annotation; ESO will distribute)'; " +
-            "exit 0; fi; " +
-            "if [ \"$(kubectl get secret -n default application-collection -o " +
-            "jsonpath='{.metadata.annotations.reflector\\.v1\\.k8s\\.emberstack\\.com/reflection-allowed}' " +
-            "2>/dev/null)\" = 'true' ]; then " +
-            "echo '[suse_rda] skipping pullsecret mirror " +
-            "(default Secret has reflector annotation; kubernetes-reflector will distribute)'; " +
-            "exit 0; fi; " +
-            # Step 1: source missing — loud fail.
-            "if ! kubectl get secret -n default application-collection " +
-            ">/dev/null 2>&1; then " +
-            "echo '[suse_rda] FATAL: Secret/application-collection not found " +
-            "in `default` (the AppCo Rancher Desktop extension would normally " +
-            "install it there). Either install/launch the AppCo extension, " +
-            "OR run `helm registry login dp.apps.rancher.io` then bootstrap " +
-            "the Secret manually via kubectl create secret docker-registry; " +
-            "OR set SUSE_RDA_SKIP_PULLSECRET_MIRROR=1 if your cluster uses " +
-            "kubernetes-reflector / External Secrets to distribute it.' >&2; " +
-            "exit 1; fi; " +
-            # sed strips instance-bound metadata (namespace + uid +
-            # resourceVersion + creationTimestamp) so the doc is
-            # namespace-portable. kubectl apply -n <target> then anchors
-            # it to the deploy NS. No jq dep — macOS doesn't ship one.
-            "kubectl get secret -n default application-collection -o yaml | " +
-            "sed -e '/^  namespace:/d' " +
-            "-e '/^  uid:/d' " +
-            "-e '/^  resourceVersion:/d' " +
-            "-e '/^  creationTimestamp:/d' | " +
-            "kubectl apply -n " + namespace + " -f - >/dev/null && " +
-            "echo '[suse_rda] mirrored Secret/application-collection " +
-            "default -> " + namespace + "'",
-            quiet=False, echo_off=True)
 
     # ─── DSL projection (rda render) ────────────────────────────────────
     # Helm resolves sub-chart values BEFORE templates run, so the library
