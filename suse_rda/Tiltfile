@@ -312,6 +312,26 @@ def suse_app(
 
         deps = sync_paths if sync_paths else ['.']
 
+        # custom_build push semantics: on dev machines (Rancher Desktop,
+        # Mac Docker) the local Docker daemon and the cluster's container
+        # runtime share containerd, so a pack build that lands in the
+        # daemon is immediately visible to the cluster — no push needed.
+        # That's the default: skips_local_docker=True + disable_push=True
+        # ("the build command handled the push; Tilt, stay out of the way").
+        #
+        # In CI against a separate k8s (k3s with its own containerd, kind,
+        # k3d, …) the image must reach the cluster via a real registry.
+        # Pack doesn't publish without --publish, so Tilt has to push the
+        # daemon-resident image to default_registry itself. Flipping both
+        # flags to False lets Tilt do that: it inspects the local daemon
+        # for the pack-tagged image and `docker push`-es it to the
+        # registry configured by default_registry().
+        #
+        # Opt-in via env var so dev behaviour stays unchanged.
+        _local_push = os.getenv('SUSE_RDA_TILT_PUSH_TO_REGISTRY') == '1'
+        _skips_local_docker = not _local_push
+        _disable_push = not _local_push
+
         if _workloads:
             # Workloads[] mode: build each workload whose image.tag == 'dev'.
             # Workloads pointing to a real registry image (tag != 'dev') are
@@ -327,8 +347,8 @@ def suse_app(
                     deps=deps,
                     ignore=[chart_path, 'deploy', '.rda', 'Tiltfile'],
                     match_in_env_vars=True,
-                    skips_local_docker=True,
-                    disable_push=True,
+                    skips_local_docker=_skips_local_docker,
+                    disable_push=_disable_push,
                     live_update=live_update_steps if live_update_steps else None,
                 )
         else:
@@ -339,8 +359,8 @@ def suse_app(
                 deps=deps,
                 ignore=[chart_path, 'deploy', '.rda', 'Tiltfile'],
                 match_in_env_vars=True,
-                skips_local_docker=True,
-                disable_push=True,
+                skips_local_docker=_skips_local_docker,
+                disable_push=_disable_push,
                 live_update=live_update_steps if live_update_steps else None,
             )
 
