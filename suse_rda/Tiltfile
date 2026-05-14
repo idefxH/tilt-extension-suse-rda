@@ -106,6 +106,20 @@ LANGUAGE_DEFAULTS = {
     },
 }
 
+# Optional registry redirect for CI / local-mirror / air-gapped setups.
+# When SUSE_RDA_DEFAULT_REGISTRY is set, register it as Tilt's default
+# registry so custom_build's $EXPECTED_REF and any chart images get
+# rewritten to that host. The e2e harness uses this to point at the
+# local kind-mirror (localhost:5000) without having to inject a
+# default_registry() into every project Tiltfile.
+#
+# Top-level on purpose: Tilt requires default_registry() before any
+# image builds are registered, so it has to run at extension load
+# time — not inside suse_app().
+_suse_rda_default_registry = os.getenv('SUSE_RDA_DEFAULT_REGISTRY', '')
+if _suse_rda_default_registry:
+    default_registry(_suse_rda_default_registry)
+
 # Conventional ports for service types declared in `services`. Used by
 # port_forwards so a developer can `psql -h localhost -p 5432`, etc.
 # Legacy hardcoded ports — used as fallback when dsl-mappings.yaml
