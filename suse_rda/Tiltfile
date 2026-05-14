@@ -27,6 +27,26 @@
 # register a service the chart doesn't deploy itself, or narrow the
 # auto-discovered set to a subset.
 
+# Allow `local()` against whatever kube context is currently active.
+# Tilt refuses to run `local()` when the active context isn't on its
+# built-in allowlist (kind, microk8s, minikube, docker-desktop, …)
+# because a `local()` against a prod cluster could nuke prod from a
+# dev's laptop. This extension shells out via `local()` for helm
+# dep-update bootstrap, the chart-alignment script, `rda namespace
+# expand`, etc. — all unavoidable — so the refusal blocks the whole
+# Tiltfile. CI runs (GitHub Actions + k3s, context `rancher-desktop`)
+# and any custom context name (k3d-*, a user's kubectl rename) trip it.
+#
+# Must be called at module top level: Tilt resolves the allowlist
+# before any function body runs, so calling it from inside suse_app()
+# is too late — the first `local()` inside suse_app() blows up before
+# the allowlist mutation takes effect.
+#
+# Safe to allow whatever context is active: the user already pointed
+# kubectl at it and ran `tilt up` against it — that's the trust
+# decision. allow_k8s_contexts is additive and idempotent.
+allow_k8s_contexts(k8s_context())
+
 # Heroku CNB builder. Multi-arch (linux/amd64 + linux/arm64) so the
 # buildpack inner loop runs natively on Apple Silicon — no Rosetta, no
 # binfmt_misc shenanigans, no /usr/bin/env: 'node': No such file or
