@@ -1392,6 +1392,16 @@ if __name__ == "__main__":
                 continue
             if not host:
                 continue
+            # Skip hosts that still contain unresolved Go template
+            # syntax (e.g. "app.{{.domain}}"). suse_app() reads
+            # values.yaml directly — BEFORE rda render substitutes
+            # .domain — so templated placeholders leak into `host`.
+            # tilt's link() validates the URL and rejects "{" in the
+            # hostname, which fails the whole Tiltfile load. Skipping
+            # produces an empty link list rather than a hard crash;
+            # the host is still rendered correctly at install time.
+            if "{{" in host or "}}" in host:
+                continue
             out.append(link(scheme + '://' + host, host))
         return out
 
