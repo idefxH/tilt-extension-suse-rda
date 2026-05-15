@@ -1875,8 +1875,8 @@ def _check_ingress_conflicts(chart_path, values_files, namespace):
     if not hosts:
         return
     out = str(local(
-        'kubectl get ingress --all-namespaces -o '
-        "jsonpath='{range .items[*]}{.metadata.namespace} {.spec.rules[*].host}{\"\\n\"}{end}' "
+        'kubectl get ingress --all-namespaces -o ' +
+        "jsonpath='{range .items[*]}{.metadata.namespace} {.spec.rules[*].host}{\"\\n\"}{end}' " +
         '2>/dev/null || true',
         quiet=True, echo_off=True,
     )).strip()
@@ -1890,10 +1890,10 @@ def _check_ingress_conflicts(chart_path, values_files, namespace):
         for h in hosts:
             if h == ing_host:
                 warn(
-                    '[suse_rda] INGRESS CONFLICT: hostname %s is already claimed '
-                    'by namespace %s — Traefik will route to the wrong service! '
-                    'Fix: kubectl delete ingress -n %s -l app.kubernetes.io/instance '
-                    'or tilt down the other project first.' % (h, ing_ns, ing_ns))
+                    ('[suse_rda] INGRESS CONFLICT: hostname %s is already claimed ' +
+                     'by namespace %s — Traefik will route to the wrong service! ' +
+                     'Fix: kubectl delete ingress -n %s -l app.kubernetes.io/instance ' +
+                     'or tilt down the other project first.') % (h, ing_ns, ing_ns))
 
 
 def _helm_rda_plugin_present():
