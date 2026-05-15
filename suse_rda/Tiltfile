@@ -27,6 +27,26 @@
 # register a service the chart doesn't deploy itself, or narrow the
 # auto-discovered set to a subset.
 
+# Allow `local()` against whatever kube context is currently active.
+# Tilt refuses to run `local()` when the active context isn't on its
+# built-in allowlist (kind, microk8s, minikube, docker-desktop, …)
+# because a `local()` against a prod cluster could nuke prod from a
+# dev's laptop. This extension shells out via `local()` for helm
+# dep-update bootstrap, the chart-alignment script, `rda namespace
+# expand`, etc. — all unavoidable — so the refusal blocks the whole
+# Tiltfile. CI runs (GitHub Actions + k3s, context `rancher-desktop`)
+# and any custom context name (k3d-*, a user's kubectl rename) trip it.
+#
+# Must be called at module top level: Tilt resolves the allowlist
+# before any function body runs, so calling it from inside suse_app()
+# is too late — the first `local()` inside suse_app() blows up before
+# the allowlist mutation takes effect.
+#
+# Safe to allow whatever context is active: the user already pointed
+# kubectl at it and ran `tilt up` against it — that's the trust
+# decision. allow_k8s_contexts is additive and idempotent.
+allow_k8s_contexts(k8s_context())
+
 # Heroku CNB builder. Multi-arch (linux/amd64 + linux/arm64) so the
 # buildpack inner loop runs natively on Apple Silicon — no Rosetta, no
 # binfmt_misc shenanigans, no /usr/bin/env: 'node': No such file or
@@ -473,6 +493,26 @@ def suse_app(
 
         deps = sync_paths if sync_paths else ['.']
 
+        # custom_build push semantics: on dev machines (Rancher Desktop,
+        # Mac Docker) the local Docker daemon and the cluster's container
+        # runtime share containerd, so a pack build that lands in the
+        # daemon is immediately visible to the cluster — no push needed.
+        # That's the default: skips_local_docker=True + disable_push=True
+        # ("the build command handled the push; Tilt, stay out of the way").
+        #
+        # In CI against a separate k8s (k3s with its own containerd, kind,
+        # k3d, …) the image must reach the cluster via a real registry.
+        # Pack doesn't publish without --publish, so Tilt has to push the
+        # daemon-resident image to default_registry itself. Flipping both
+        # flags to False lets Tilt do that: it inspects the local daemon
+        # for the pack-tagged image and `docker push`-es it to the
+        # registry configured by default_registry().
+        #
+        # Opt-in via env var so dev behaviour stays unchanged.
+        _local_push = os.getenv('SUSE_RDA_TILT_PUSH_TO_REGISTRY') == '1'
+        _skips_local_docker = not _local_push
+        _disable_push = not _local_push
+
         if _workloads:
             # Workloads[] mode: build each workload whose image.tag == 'dev'.
             # Workloads pointing to a real registry image (tag != 'dev') are
@@ -487,8 +527,9 @@ def suse_app(
                     command=pack_cmd,
                     deps=deps,
                     ignore=[chart_path, 'deploy', '.rda', 'Tiltfile'],
-                    skips_local_docker=False,
-                    disable_push=True,
+                    match_in_env_vars=True,
+                    skips_local_docker=_skips_local_docker,
+                    disable_push=_disable_push,
                     live_update=live_update_steps if live_update_steps else None,
                 )
         else:
@@ -498,8 +539,9 @@ def suse_app(
                 command=pack_cmd,
                 deps=deps,
                 ignore=[chart_path, 'deploy', '.rda', 'Tiltfile'],
-                skips_local_docker=False,
-                disable_push=True,
+                match_in_env_vars=True,
+                skips_local_docker=_skips_local_docker,
+                disable_push=_disable_push,
                 live_update=live_update_steps if live_update_steps else None,
             )
 
@@ -1411,9 +1453,15 @@ if __name__ == "__main__":
                 continue
             if not host:
                 continue
-            if '{{.domain}}' in host and _domain_value:
-                host = host.replace('{{.domain}}', _domain_value)
-            if '{{' in host:
+            # Skip hosts that still contain unresolved Go template
+            # syntax (e.g. "app.{{.domain}}"). suse_app() reads
+            # values.yaml directly — BEFORE rda render substitutes
+            # .domain — so templated placeholders leak into `host`.
+            # tilt's link() validates the URL and rejects "{" in the
+            # hostname, which fails the whole Tiltfile load. Skipping
+            # produces an empty link list rather than a hard crash;
+            # the host is still rendered correctly at install time.
+            if "{{" in host or "}}" in host:
                 continue
             out.append(link(scheme + '://' + host, host))
         return out
