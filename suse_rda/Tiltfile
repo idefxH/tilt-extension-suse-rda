@@ -1784,12 +1784,14 @@ if __name__ == "__main__":
         if is_operator_managed and cr_object:
             # Operator-managed charts (e.g. CNPG): k8s_kind() registered
             # the CRD kind above, so Tilt auto-discovers the CR as a
-            # workload. Rename it to the DSL workload name and attach
-            # operator-created pods via label selectors.
+            # workload. Keep its discovered name (cr_name) — do NOT
+            # rename to the DSL workload name, because that name is
+            # already taken by the operator's auto-discovered Deployment
+            # (e.g. app-cloudnative-pg). Attach operator-created pods
+            # via label selectors.
             cr_name = cr_object.split(':')[0]
             resource_kwargs = {
                 'workload': cr_name,
-                'new_name': workload,
                 'labels': [labels.get(workload, 'services')],
                 'links': svc_links,
             }
