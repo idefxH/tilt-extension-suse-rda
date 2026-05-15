@@ -1417,6 +1417,11 @@ if __name__ == "__main__":
         helm_set.append('image.repository=' + _img_repo)
         helm_set.append('image.tag=' + _img_tag)
 
+    # Check for ingress hostname conflicts with other namespaces.
+    # Two projects with the same ingress host (e.g. auth.localtest.me)
+    # cause Traefik to route to the wrong service silently.
+    _check_ingress_conflicts(chart_path, chart_values_files, namespace)
+
     k8s_yaml(helm(
         chart_path,
         name=name,
@@ -1848,6 +1853,48 @@ if __name__ == "__main__":
 # port-forwards. For the batteries-included experience, stick with
 # suse_app(); for projects already on rda-cli v0.2.0+ that want the
 # plugin's one-step flow without the legacy machinery, this is the hook.
+
+def _check_ingress_conflicts(chart_path, values_files, namespace):
+    """Warn if any ingress hostname is already claimed by another namespace."""
+    hosts = []
+    for vfile in values_files:
+        vals = read_yaml(vfile, default={})
+        sl = vals.get('suse-library', {})
+        domain = sl.get('domain', '')
+        for svc in sl.get('services', []):
+            if not svc.get('enabled', False):
+                continue
+            ing = svc.get('ingress', {})
+            svc_hosts = ing.get('hosts', [])
+            if ing.get('host'):
+                svc_hosts = svc_hosts + [ing['host']]
+            for h in svc_hosts:
+                h = h.replace('{{.domain}}', domain)
+                if h:
+                    hosts.append(h)
+    if not hosts:
+        return
+    out = str(local(
+        'kubectl get ingress --all-namespaces -o '
+        "jsonpath='{range .items[*]}{.metadata.namespace} {.spec.rules[*].host}{\"\\n\"}{end}' "
+        '2>/dev/null || true',
+        quiet=True, echo_off=True,
+    )).strip()
+    for line in out.split('\n'):
+        parts = line.strip().split(' ', 1)
+        if len(parts) < 2:
+            continue
+        ing_ns, ing_host = parts[0], parts[1]
+        if ing_ns == namespace:
+            continue
+        for h in hosts:
+            if h == ing_host:
+                warn(
+                    '[suse_rda] INGRESS CONFLICT: hostname %s is already claimed '
+                    'by namespace %s — Traefik will route to the wrong service! '
+                    'Fix: kubectl delete ingress -n %s -l app.kubernetes.io/instance '
+                    'or tilt down the other project first.' % (h, ing_ns, ing_ns))
+
 
 def _helm_rda_plugin_present():
     """True iff `helm plugin list` reports a plugin named 'rda'."""
