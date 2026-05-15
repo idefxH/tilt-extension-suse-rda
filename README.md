@@ -154,6 +154,13 @@ local port:
 | `rabbitmq` | 5672 |
 | `nats` | 4222 |
 
+## Environment variables
+
+| Var | Effect |
+|---|---|
+| `SUSE_RDA_DEFAULT_REGISTRY` | Calls `default_registry(...)` at extension load. Use for CI / local-mirror / air-gapped setups (e.g. `localhost:5000` for the e2e kind-mirror). |
+| `SUSE_RDA_SKIP_PULLSECRET_MIRROR=1` | Skip the `default → <ns>` mirror of `Secret/application-collection`. Set when an operator (kubernetes-reflector, External Secrets) distributes the pull secret instead. |
+
 ## SUSE-AppCo buildpacks (future)
 
 When the SUSE-AppCo buildpacks land, override the builder:
