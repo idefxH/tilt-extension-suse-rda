@@ -755,7 +755,7 @@ def _yaml():
         sys.exit(2)
 
 
-def enabled_charts(values_files):
+def enabled_charts(values_files, library_dir=None):
     """Union the chart names with .enabled=true across all values files.
 
     Three shapes supported:
@@ -769,6 +769,16 @@ def enabled_charts(values_files):
 
     Top-level `<chart>.enabled` is also checked as a fallback for the
     rare project that pre-dates the DSL.
+
+    Operator-enabled charts: when `library_dir` is provided, also scan
+    `dsl-mappings.yaml`'s `charts.<type>.versions[].chart_defaults` for
+    any `<other-chart>.enabled: true` keys, and union those chart names
+    too. Required because DSL type names (e.g. `cnpg`) can differ from
+    the operator sub-chart they pull in (e.g. `cloudnative-pg`). On a
+    cold start (CI), values.generated.yaml is empty so the chart_defaults
+    haven't been materialized into the overlay yet — without this lookup
+    the operator dep gets filtered out and `k8s_resource` references to
+    it fail at runtime with `unknown resource`.
     """
     yaml = _yaml()
     enabled = set()
@@ -823,6 +833,28 @@ def enabled_charts(values_files):
                 continue
             if isinstance(sub, dict) and sub.get("enabled") is True:
                 enabled.add(name)
+
+    # Operator chart_defaults expansion: for each enabled DSL type, pull
+    # any `<chart>.enabled: true` keys out of its dsl-mappings entry's
+    # chart_defaults and union those chart names too. Snapshot the set
+    # first so we only expand from user-declared types, not transitively.
+    if library_dir:
+        dsl_path = os.path.join(library_dir, "dsl-mappings.yaml")
+        if os.path.isfile(dsl_path):
+            try:
+                with open(dsl_path) as f:
+                    dsl = yaml.safe_load(f) or {}
+            except Exception:
+                dsl = {}
+            charts_dsl = dsl.get("charts") or {}
+            for t in list(enabled):
+                entry = charts_dsl.get(t) or {}
+                for ver in (entry.get("versions") or []):
+                    if not isinstance(ver, dict):
+                        continue
+                    for k, v in (ver.get("chart_defaults") or {}).items():
+                        if k.endswith(".enabled") and v is True:
+                            enabled.add(k[:-len(".enabled")])
     return enabled
 
 
@@ -844,7 +876,7 @@ def main(library_dir, *values_files):
     if not full_deps:
         return  # nothing to filter
 
-    enabled = enabled_charts(values_files)
+    enabled = enabled_charts(values_files, library_dir=library_dir)
 
     # Multi-instance aliasing (#24): expand deps for types with
     # multiple bindings. Read services[] to find multi-instance types,
