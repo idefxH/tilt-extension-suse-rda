@@ -1495,12 +1495,27 @@ if __name__ == "__main__":
         For single-instance types, chart_alias == service_type (backward compat).
         For multi-instance types, chart_alias == <type>-<binding> and the
         host template is adjusted accordingly.
+
+        For operator-managed types (e.g. cnpg), the `service.host` template
+        points at a Service that is created at RUNTIME by the operator
+        once the CR is reconciled (e.g. `<release>-cnpg-rw`). That name is
+        NOT in the helm-rendered manifest, so registering it with
+        k8s_resource() fails with "unknown resource". Instead, when the
+        mapping declares `operator_managed: true`, use `operator_resource`
+        — the chart-rendered operator/cluster handle that Tilt CAN see.
         """
         chart_entry = catalogued_charts.get(service_type, {})
         versions = chart_entry.get('versions', [])
         if not versions:
             return release + '-' + chart_alias
-        host_tpl = versions[0].get('service', {}).get('host', '')
+        ver = versions[0]
+        if ver.get('operator_managed', False):
+            op_tpl = ver.get('operator_resource', '')
+            if op_tpl:
+                if chart_alias != service_type:
+                    op_tpl = op_tpl.replace('-' + service_type, '-' + chart_alias, 1)
+                return op_tpl.replace('{{ .Release.Name }}', release).replace('{{.Release.Name}}', release)
+        host_tpl = ver.get('service', {}).get('host', '')
         if not host_tpl:
             return release + '-' + chart_alias
         # For multi-instance, replace the type in the host template with the alias.
