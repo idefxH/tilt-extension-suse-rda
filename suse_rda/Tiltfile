@@ -463,7 +463,20 @@ def suse_app(
             pack_args.extend(['--env', '%s=%s' % (k, v)])
         dev_proc = defaults.get('pack_default_process')
         if dev_proc:
-            pack_args.extend(['--default-process', dev_proc])
+            # Only pass --default-process if the Procfile actually declares
+            # that process name. Brownfield apps typically only have 'web:';
+            # forcing 'dev' would crash pack build with "tried to set dev to
+            # default but it doesn't exist".
+            _procfile_path = build_path + '/Procfile'
+            _has_dev_proc = False
+            if os.path.exists(_procfile_path):
+                _pf_content = str(read_file(_procfile_path))
+                for _pf_line in _pf_content.splitlines():
+                    if _pf_line.startswith(dev_proc + ':'):
+                        _has_dev_proc = True
+                        break
+            if _has_dev_proc:
+                pack_args.extend(['--default-process', dev_proc])
         for k, v in (defaults.get('pack_build_env') or {}).items():
             pack_args.extend(['--env', '%s=%s' % (k, v)])
         pack_args.extend(['--path', build_path])
