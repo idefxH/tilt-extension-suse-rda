@@ -48,7 +48,7 @@ That replaces ~30 lines of `docker_build` / `helm` / `k8s_resource` boilerplate
 with one call. Port is auto-discovered from `suse-library.port` in values.yaml
 (default 8080). **Service port-forwards are auto-discovered from `chart/values.yaml`** — every entry under `suse-library.services[]` with `provisioning: deploy` AND a matching `<chart>.enabled: true` gets a port-forward registered. The Tiltfile stays in lockstep with `values.yaml` automatically; you don't list services in two places.
 
-Entries with `provisioning: connect` or `provisioning: connect` are skipped (no in-cluster workload to forward). Entries whose sub-chart is not enabled are also skipped (no workload deployed).
+Entries with `provisioning: connect`, `shared`, or `external` are skipped (no in-cluster workload to forward — they bind to a pre-existing instance via the binding secret). Their operator sub-charts (e.g. `cloudnative-pg` for a connect-mode postgresql) are also dropped from `Chart.yaml` so `helm dep update` doesn't pull them. Entries whose sub-chart is not enabled are also skipped (no workload deployed).
 
 The pre-DSL legacy auto-discovery (`<chart>.enabled` without `services[]`) was dropped in v0.2.0 alongside bundle v0.10+. If you're on a bundle ≤ v0.9, either upgrade the bundle or pin the extension to its 0.1.x line.
 
