@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Disable Tilt's secret-value scrubber by default.** The rda library-chart
+  writes Service-Binding-Spec-compliant Secrets whose stringData contains
+  the chart `type` field (`postgresql`, `prometheus`, `grafana`, `dex`, …) —
+  required by the SBS. Tilt's built-in scrubber harvests every Secret value
+  it deploys and substitutes the literal strings everywhere in its UI, so a
+  workload named `app-prometheus-server` displayed as
+  `app-[redacted secret app-mon-binding:type]-server` — unintelligible to
+  the dev, mismatch with `kubectl get`. The k8s_resource registrations
+  themselves were always correct; only the display layer was mangled.
+  Now off by default; opt back in with `SUSE_RDA_ENABLE_TILT_SCRUB=1`
+  (e.g. for screen-shared demos).
+
 ## [0.5.0] - 2026-05-10
 
 _helm-rda plugin integration (rda-cli v0.2.0+)._

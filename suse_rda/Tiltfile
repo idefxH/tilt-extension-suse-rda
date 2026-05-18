@@ -140,6 +140,35 @@ _suse_rda_default_registry = os.getenv('SUSE_RDA_DEFAULT_REGISTRY', '')
 if _suse_rda_default_registry:
     default_registry(_suse_rda_default_registry)
 
+# Disable Tilt's secret-value scrubber for binding-secret values.
+#
+# The rda library-chart writes Service-Binding-Spec-compliant Secrets
+# whose stringData contains the chart `type` (`postgresql`, `prometheus`,
+# `grafana`, `dex`, ...) and `provider` (`rda-appco`). The SBS REQUIRES
+# `type` to live in the Secret data — that's not optional. Tilt then
+# harvests every Secret value it deploys and substitutes the literal
+# strings everywhere in its log/UI output, so a workload named
+# `app-prometheus-server` displays as
+# `app-[redacted secret app-mon-binding:type]-server`. The k8s_resource
+# registrations themselves are correct (verified via
+# `tilt alpha tiltfile-result` — manifest names are clean) but the dev's
+# Tilt UI shows garbled resource names that don't match what `kubectl
+# get` returns.
+#
+# Trade-off: with scrubbing off, real Secret VALUES (passwords, OIDC
+# client_secret, OAuth cookie_secret) ALSO appear in Tilt logs. In a
+# `tilt up` dev session this is fine — the dev owns those secrets and
+# created them locally. In a `tilt ci` CI run the test fixtures use
+# throwaway random passwords (`grafpw-<sha>`, `dexpw-<sha>`) by
+# convention. The alternative — scrubbing on by default — gives
+# unintelligible workload names AND doesn't actually protect against
+# anything since `type=prometheus` isn't a secret in the first place.
+#
+# Set SUSE_RDA_ENABLE_TILT_SCRUB=1 to opt back in (e.g. for screen-shared
+# demos where the dev wants password redaction in the UI).
+if os.getenv('SUSE_RDA_ENABLE_TILT_SCRUB', '') != '1':
+    secret_settings(disable_scrub=True)
+
 # Conventional ports for service types declared in `services`. Used by
 # port_forwards so a developer can `psql -h localhost -p 5432`, etc.
 # Legacy hardcoded ports — used as fallback when dsl-mappings.yaml
