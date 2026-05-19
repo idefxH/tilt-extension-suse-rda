@@ -2028,6 +2028,99 @@ if __name__ == "__main__":
             return True
         return False
 
+    # ─── CNPG webhook lifecycle ─────────────────────────────────────────
+    # The cloudnative-pg sub-chart installs cluster-scoped
+    # Mutating/ValidatingWebhookConfiguration objects that need two
+    # special-case bits the rest of the catalog doesn't.
+    #
+    # (B1) Stale-webhook prune — `tilt down` does NOT reliably remove
+    # cluster-scoped webhook configs whose names are helm-templated
+    # off the release. A leftover config from a prior scenario has
+    # `clientConfig.service.namespace` pointing at a now-deleted
+    # namespace; the kube-apiserver then blocks every CNPG admission
+    # in the new scenario with `no endpoints available for service
+    # "cnpg-webhook-service"`. We prune any configs whose target
+    # namespace no longer exists, BEFORE Tilt applies the new helm
+    # output. Label-scoped to `app.kubernetes.io/name=cloudnative-pg`
+    # so we don't touch unrelated webhook configs.
+    #
+    # (B2) Endpoint-ready gate — on a cold cluster the operator pod
+    # image pull can run >5s. The Cluster CR is rendered in the same
+    # helm stream as the operator Deployment + webhook configs, and
+    # the apiserver tries to validate the CR via the webhook the
+    # moment kubectl apply lands. With no operator pod yet, validation
+    # fails. We register a local_resource that waits for the operator's
+    # webhook Service to have at least one Endpoints address, and
+    # add it to the Cluster CR's resource_deps below.
+    _has_cnpg = False
+    _cnpg_operator_resource = ''
+    for _binding, _stype in services.items():
+        if _stype == 'cnpg':
+            _has_cnpg = True
+            _ce = catalogued_charts.get(_stype, {})
+            _cvs = _ce.get('versions', [])
+            if _cvs:
+                _op_tpl = _cvs[0].get('operator_resource', '')
+                if _op_tpl:
+                    _cnpg_operator_resource = (_op_tpl
+                        .replace('{{ .Release.Name }}', name)
+                        .replace('{{.Release.Name}}', name))
+            break
+    _cnpg_webhook_ready_resource = ''
+    if _has_cnpg:
+        # (B1) Prune orphaned webhook configs synchronously.
+        local(
+            "set -e; " +
+            "for wc in " +
+            "$(kubectl get mutatingwebhookconfigurations.admissionregistration.k8s.io " +
+            "-l app.kubernetes.io/name=cloudnative-pg -o name 2>/dev/null) " +
+            "$(kubectl get validatingwebhookconfigurations.admissionregistration.k8s.io " +
+            "-l app.kubernetes.io/name=cloudnative-pg -o name 2>/dev/null); do " +
+            "ns=$(kubectl get \"$wc\" -o " +
+            "jsonpath='{.webhooks[0].clientConfig.service.namespace}' 2>/dev/null); " +
+            "if [ -n \"$ns\" ] && ! kubectl get namespace \"$ns\" " +
+            ">/dev/null 2>&1; then " +
+            "kubectl delete \"$wc\" --ignore-not-found >/dev/null && " +
+            "echo \"[suse_rda] pruned stale cnpg webhook $wc " +
+            "(target ns $ns missing)\"; " +
+            "fi; " +
+            "done",
+            quiet=False, echo_off=True)
+
+        # (B2) Endpoint-ready gate. Polls every 2s for up to 180s.
+        # `resource_deps` on the operator Deployment makes Tilt run
+        # this only after the operator pod is past Pending. The
+        # Cluster CR's k8s_resource (below) deps on this resource,
+        # which gates the kubectl apply of the CR.
+        _cnpg_webhook_ready_resource = name + '-cnpg-webhook-ready'
+        _wait_deps = []
+        if _cnpg_operator_resource:
+            _wait_deps = [_cnpg_operator_resource]
+        local_resource(
+            _cnpg_webhook_ready_resource,
+            cmd=(
+                "set -e; " +
+                "for i in $(seq 1 90); do " +
+                "ips=$(kubectl get endpoints cnpg-webhook-service " +
+                "-n " + namespace + " " +
+                "-o jsonpath='{.subsets[*].addresses[*].ip}' " +
+                "2>/dev/null || true); " +
+                "if [ -n \"$ips\" ]; then " +
+                "echo \"[suse_rda] cnpg-webhook-service endpoints " +
+                "ready in " + namespace + ": $ips\"; " +
+                "exit 0; " +
+                "fi; " +
+                "sleep 2; " +
+                "done; " +
+                "echo \"[suse_rda] FATAL: cnpg-webhook-service has " +
+                "no endpoints after 180s in ns " + namespace + "\" >&2; " +
+                "exit 1"
+            ),
+            resource_deps=_wait_deps,
+            labels=['cnpg'],
+            allow_parallel=True,
+        )
+
     used_local_ports = {}
     for binding_name, service_type in services.items():
         chart_alias = aliases[binding_name]
@@ -2118,8 +2211,15 @@ if __name__ == "__main__":
             }
             if pod_selector:
                 resource_kwargs['extra_pod_selectors'] = [pod_selector]
+            _cr_deps = []
             if operator_resource:
-                resource_kwargs['resource_deps'] = [operator_resource]
+                _cr_deps.append(operator_resource)
+            # CNPG: also wait for the operator's webhook service to have
+            # endpoints before applying the Cluster CR (see B2 above).
+            if service_type == 'cnpg' and _cnpg_webhook_ready_resource:
+                _cr_deps.append(_cnpg_webhook_ready_resource)
+            if _cr_deps:
+                resource_kwargs['resource_deps'] = _cr_deps
             if svc_port:
                 local_port = svc_port
                 if local_port < 1024:

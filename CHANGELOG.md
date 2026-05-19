@@ -4,6 +4,26 @@
 
 ### Fixed
 
+- **CNPG: prune stale cluster-scoped webhook configs at tilt up.** `tilt down`
+  does not reliably remove the `Mutating/ValidatingWebhookConfiguration`
+  objects the cloudnative-pg sub-chart installs (they are cluster-scoped and
+  templated off the release name). Configs left behind from a prior scenario
+  have `clientConfig.service.namespace` pointing at a now-deleted namespace,
+  and the kube-apiserver blocks every subsequent CNPG admission with
+  `no endpoints available for service "cnpg-webhook-service"`. When `cnpg`
+  is in the service catalog, suse_app() now scans webhook configs labelled
+  `app.kubernetes.io/name=cloudnative-pg`, deletes any whose target
+  namespace no longer exists, and lets the fresh helm install re-create
+  them clean. Found via rda-e2e-tests.
+- **CNPG: gate the Cluster CR apply on operator webhook-service endpoints.**
+  On a cold cluster the operator pod image pull can run >5s. The Cluster CR
+  is in the same helm manifest stream as the operator Deployment, and the
+  apiserver tries to validate the CR via the webhook the moment kubectl
+  apply lands. With no operator pod yet, `tilt ci` failed with
+  `no endpoints available for service "cnpg-webhook-service"`. A new
+  `<release>-cnpg-webhook-ready` local_resource polls the operator's
+  webhook Service Endpoints for up to 180s (2s × 90), and the Cluster CR's
+  k8s_resource resource_deps on it. Found via rda-e2e-tests.
 - **Disable Tilt's secret-value scrubber by default.** The rda library-chart
   writes Service-Binding-Spec-compliant Secrets whose stringData contains
   the chart `type` field (`postgresql`, `prometheus`, `grafana`, `dex`, …) —
